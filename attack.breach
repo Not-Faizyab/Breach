@@ -1,11 +1,22 @@
-set target = 1.1.1.1;
+set targets = list;
+push targets "1.1.1.1";
+push targets "8.8.8.8";
 
-log "--- DEPLOYING COMPOSITIONAL SWARM ---";
+log "--- INITIATING STEALTH SWARM ---";
 
-swarm target ports 1 to 500:
-    if open:
-        log "[!] TARGET FOUND. Executing Payload on Port:";
-        log port;
-        payload target port "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\n\r\n";
+for target in targets:
+    set delay = rand 100 to 1000;
+    log "Jitter delay active (ms):";
+    log delay;
+    wait delay;
+
+    swarm target ports 1 to 100:
+        if open:
+            append "found.log" target;
+            append "found.log" port;
+            log "[!] SUCCESS SAVED TO LOG";
+        end
     end
 end
+
+log "--- SEQUENCE FINALIZED ---";
