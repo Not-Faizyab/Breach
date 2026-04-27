@@ -3,10 +3,8 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write as StdWrite};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::net::TcpStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // --- CORE DATA ARCHITECTURE ---
 
@@ -80,7 +78,6 @@ fn get_entropy_seed() -> usize {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as usize
 }
 
-/// Injects non-functional instructions into the token stream to randomize memory signatures.
 fn mutate_token_stream(tokens: Vec<Token>) -> Vec<Token> {
     let mut mutated = Vec::new();
     let mut count = 0;
@@ -137,7 +134,6 @@ impl Parser {
                     "while" => self.parse_while(),
                     "for" => self.parse_for(),
                     "payload" => self.parse_payload(),
-                    "end" => self.next(),
                     _ => self.next(),
                 }
             } else { self.next(); }
@@ -149,7 +145,7 @@ impl Parser {
         let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!("ID expected"); };
         self.next(); // Consume '='
         let val = self.parse_expression();
-        self.expect_keyword(";"); // Using log/set logic
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
         self.memory.insert(name, val);
     }
 
@@ -210,6 +206,20 @@ impl Parser {
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
     }
 
+    fn parse_scan(&mut self) {
+        self.expect_keyword("scan");
+        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+
+        let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
+        let port = match self.memory.get("port") { Some(Value::Num(p)) => *p as u16, _ => 80 };
+        
+        let addr = format!("{}:{}", ip, port);
+        let status = TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok();
+        
+        self.parse_if(status);
+    }
+
     fn parse_swarm(&mut self) {
         self.expect_keyword("swarm");
         let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
@@ -218,15 +228,14 @@ impl Parser {
         self.expect_keyword("to");
         let end = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
         
-        if let Some(Token::Punctuation(p)) = self.peek() { if p == ":" { self.next(); } }
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
 
-        // Block extraction for isolated execution
         let mut sub_tokens = Vec::new();
         let mut depth = 1;
         while let Some(tok) = self.peek() {
             self.next();
             if let Token::Keyword(ref k) = tok {
-                if ["if", "for", "while", "swarm"].contains(&k.as_str()) { depth += 1; }
+                if ["if", "for", "while", "swarm", "scan"].contains(&k.as_str()) { depth += 1; }
                 if k == "end" { depth -= 1; if depth == 0 { break; } }
             }
             sub_tokens.push(tok);
@@ -248,7 +257,6 @@ impl Parser {
                 tasks.push(tokio::task::spawn_blocking(move || {
                     let addr = format!("{}:{}", ip_clone, port);
                     let status = TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(400)).is_ok();
-                    
                     local_mem.insert("port".to_string(), Value::Num(port as f64));
                     let mut engine = Parser::new(tokens_clone);
                     engine.memory = local_mem;
@@ -268,24 +276,25 @@ impl Parser {
     fn parse_if(&mut self, condition: bool) {
         self.expect_keyword("if");
         self.next(); // Consume "open" or identifier
-        if let Some(Token::Punctuation(_)) = self.peek() { self.next(); }
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
         
         if condition {
             while let Some(tok) = self.peek() {
                 if let Token::Keyword(ref k) = tok { if k == "end" { break; } }
                 self.parse();
             }
+            self.expect_keyword("end");
         } else {
             let mut d = 1;
             while d > 0 {
                 self.next();
                 if let Some(Token::Keyword(ref k)) = self.peek() {
-                    if k == "if" { d += 1; }
+                    if ["if", "swarm", "scan", "while", "for"].contains(&k.as_str()) { d += 1; }
                     if k == "end" { d -= 1; }
                 }
             }
+            if let Some(Token::Keyword(ref k)) = self.peek() { if k == "end" { self.next(); } }
         }
-        self.expect_keyword("end");
     }
 
     fn parse_payload(&mut self) {
@@ -310,9 +319,15 @@ impl Parser {
         }
     }
 
-    // Existing loop primitives
-    fn parse_while(&mut self) { self.expect_keyword("while"); /* Logic as before */ }
-    fn parse_for(&mut self) { self.expect_keyword("for"); /* Logic as before */ }
+    fn parse_while(&mut self) { 
+        self.expect_keyword("while");
+        // Simplified for this version to keep logic clean
+    }
+
+    fn parse_for(&mut self) {
+        self.expect_keyword("for");
+        // Simplified for this version
+    }
 }
 
 fn main() {
