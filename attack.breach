@@ -1,9 +1,6 @@
-import "call.breach";
+set url = "https://discord.com/api/webhooks/";
 
-log "--- STARTING MAIN ROUTINE ---";
+// Manually forge the Discord JSON packet
+set data = "{ \"content\": \"[!] Webhook test 2 successful\" }";
 
-set exfil_data = "Import test";
-
-call stealth_exfil;
-
-log "--- ROUTINE FINISHED ---";
+transmit url data;

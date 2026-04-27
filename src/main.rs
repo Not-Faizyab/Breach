@@ -7,10 +7,6 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// =====================================================================
-// --- CORE DATA ARCHITECTURE ---
-// =====================================================================
-
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Keyword(String),
@@ -37,19 +33,23 @@ enum Value {
 // --- LEXICAL ANALYSIS ENGINE ---
 // =====================================================================
 
+// =====================================================================
+// --- LEXICAL ANALYSIS ENGINE (UPDATED FOR JSON) ---
+// =====================================================================
+
 fn lexer(code: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     
     let token_rules = vec![
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        // ADDED: import
         ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
         ("OP", r"[+\-*/]"),
-        ("STRING", r#""[^"]*""#),
+        // FIXED: The Regex now intelligently handles escaped quotes (\")
+        ("STRING", r#""(?:\\.|[^"\\])*""#),
         ("DELIM", r";"),
         ("PUNCT", r"[{}:,]"),
         ("SKIP", r"[ \t\n\r]+"),
@@ -68,7 +68,8 @@ fn lexer(code: &str) -> Vec<Token> {
         let m = caps.get(0).unwrap();
         
         if m.start() > last_end { 
-            panic!("[FATAL] Lexer failure at offset {}. Invalid syntax.", last_end); 
+            let snippet = &code[last_end..m.start()];
+            panic!("[FATAL] Lexer failure at offset {}. Unrecognized syntax: '{}'", last_end, snippet); 
         }
         last_end = m.end();
         
@@ -82,7 +83,12 @@ fn lexer(code: &str) -> Vec<Token> {
         else if caps.name("COMP").is_some() { tokens.push(Token::Compare(val)); }
         else if caps.name("ASSIGN").is_some() { tokens.push(Token::Assign); }
         else if caps.name("OP").is_some() { tokens.push(Token::Operator(val)); }
-        else if caps.name("STRING").is_some() { tokens.push(Token::StringLiteral(val.trim_matches('"').to_string())); }
+        else if caps.name("STRING").is_some() { 
+            // FIXED: Strip the outer quotes and clean up the escaped quotes for the JSON API
+            let inner_string = &val[1..val.len()-1];
+            let clean_string = inner_string.replace("\\\"", "\"").replace("\\n", "\n");
+            tokens.push(Token::StringLiteral(clean_string)); 
+        }
         else if caps.name("DELIM").is_some() { tokens.push(Token::Delimiter); }
         else if caps.name("PUNCT").is_some() { tokens.push(Token::Punctuation(val)); }
     }
@@ -451,20 +457,37 @@ impl Parser {
 
     fn parse_transmit(&mut self) {
         self.expect_keyword("transmit");
+        
         let url_val = self.parse_factor();
-        let data_to_send = match self.parse_factor() {
-            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l),
+        let raw_payload = match self.parse_factor() {
+            Value::Num(n) => n.to_string(), 
+            Value::Str(s) => s, 
+            Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l),
         };
+        
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        
         let url = if let Value::Str(s) = url_val { s } else { panic!("[RUNTIME_ERR] Transmit requires a valid URL."); };
         
-        println!("[*] Establishing secure TLS tunnel to target...");
+        println!("[*] Establishing universal API tunnel to target...");
+        
         if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build() {
-            let mut json_payload = HashMap::new(); json_payload.insert("content", data_to_send);
-            match client.post(&url).json(&json_payload).send() {
+            // We blast the raw string directly into the HTTP body, marked as JSON
+            match client.post(&url)
+                .header("Content-Type", "application/json")
+                .body(raw_payload)
+                .send() 
+            {
                 Ok(response) => {
-                    if response.status().is_success() { println!("[+] EXFILTRATION SUCCESS (Status: {})", response.status()); } 
-                    else { println!("[-] EXFILTRATION REJECTED (Status: {})", response.status()); }
+                    if response.status().is_success() { 
+                        println!("[+] EXFILTRATION SUCCESS (Status: {})", response.status()); 
+                    } else { 
+                        // If the API rejects it, we rip the error message out of the server's response
+                        let status = response.status();
+                        let error_text = response.text().unwrap_or_else(|_| "Unknown API Error".to_string());
+                        println!("[-] EXFILTRATION REJECTED (Status: {})\n[Debug] Server replied: {}", status, error_text); 
+                    }
                 },
                 Err(e) => println!("[!] NETWORK FATAL: {}", e),
             }
