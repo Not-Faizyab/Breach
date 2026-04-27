@@ -32,11 +32,11 @@ enum Value {
 fn lexer(code: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     
-    // Exact same Regex rules as your Python prototype
+    // We added 'swarm', 'ports', and 'to' to the arsenal
     let token_rules = vec![
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log)\b"),
+        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
@@ -114,6 +114,7 @@ impl Parser {
                     "set" => self.parse_assignment(),
                     "log" => self.parse_log(),
                     "scan" => self.parse_scan(),
+                    "swarm" => self.parse_swarm(), // NEW ASYNC ROUTE
                     "while" => self.parse_while(),
                     "for" => self.parse_for(),
                     "payload" => self.parse_payload(),
@@ -132,13 +133,9 @@ impl Parser {
             _ => panic!("[ERR_SYNTAX_0x01] Expected Identifier after 'set'."),
         };
 
-        if let Some(Token::Assign) = self.peek() { self.next(); } 
-        else { panic!("[ERR_SYNTAX_0x01] Expected '='."); }
-
+        if let Some(Token::Assign) = self.peek() { self.next(); } else { panic!(); }
         let val = self.parse_condition();
-        
-        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
-        else { panic!("[ERR_SYNTAX_0x01] Expected ';'."); }
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } else { panic!(); }
 
         println!("[Memory] {} = {:?}", var_name, val);
         self.memory.insert(var_name, val);
@@ -152,8 +149,7 @@ impl Parser {
             if let (Value::Num(l), Value::Num(r)) = (&left, &right) {
                 let result = match op.as_str() {
                     "<" => l < r, ">" => l > r, "==" => l == r, "!=" => l != r,
-                    "<=" => l <= r, ">=" => l >= r,
-                    _ => false,
+                    "<=" => l <= r, ">=" => l >= r, _ => false,
                 };
                 return Value::Bool(result);
             }
@@ -190,14 +186,14 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> Value {
-        let token = self.peek().expect("[ERR_SYNTAX_0x01] Unexpected EOF.");
+        let token = self.peek().unwrap();
         self.next();
         match token {
             Token::Number(n) => Value::Num(n),
             Token::StringLiteral(s) => Value::Str(s),
             Token::IpAddress(ip) => Value::Str(ip),
-            Token::Identifier(id) => self.memory.get(&id).cloned().expect(&format!("[ERR_MEM_NULL_0x02] Variable '{}' unallocated.", id)),
-            _ => panic!("[ERR_TYPE_INVALID_0x04] Invalid data type caught."),
+            Token::Identifier(id) => self.memory.get(&id).cloned().expect("[ERR_MEM_NULL_0x02]"),
+            _ => panic!("[ERR_TYPE_INVALID_0x04] Invalid data type."),
         }
     }
 
@@ -209,10 +205,10 @@ impl Parser {
         match token {
             Some(Token::StringLiteral(s)) => println!("> {}", s.replace("\\r\\n", "\r\n").replace("\\n", "\n")),
             Some(Token::Identifier(id)) => {
-                let val = self.memory.get(&id).expect("[ERR_MEM_NULL_0x02]");
+                let val = self.memory.get(&id).unwrap();
                 println!("> {:?}", val);
             }
-            _ => panic!("[ERR_SYNTAX_0x01] Invalid log target."),
+            _ => panic!(),
         }
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
     }
@@ -221,28 +217,19 @@ impl Parser {
     fn parse_while(&mut self) {
         self.expect_keyword("while");
         let start_pos = self.pos;
-
         loop {
             self.pos = start_pos;
-            let condition = match self.parse_condition() {
-                Value::Bool(b) => b,
-                _ => panic!("[ERR_TYPE_INVALID_0x04] While loop condition must be boolean."),
-            };
-
-            if let Some(Token::Punctuation(p)) = self.peek() { 
-                if p == ":" { self.next(); } 
-            }
+            let condition = match self.parse_condition() { Value::Bool(b) => b, _ => panic!() };
+            if let Some(Token::Punctuation(p)) = self.peek() { if p == ":" { self.next(); } }
 
             if condition {
                 while let Some(tok) = self.peek() {
                     if let Token::Keyword(k) = tok {
                         if k == "end" { break; }
                         match k.as_str() {
-                            "set" => self.parse_assignment(),
-                            "log" => self.parse_log(),
-                            "scan" => self.parse_scan(),
-                            "payload" => self.parse_payload(),
-                            _ => self.next(),
+                            "set" => self.parse_assignment(), "log" => self.parse_log(),
+                            "scan" => self.parse_scan(), "payload" => self.parse_payload(),
+                            "swarm" => self.parse_swarm(), _ => self.next(),
                         }
                     } else { self.next(); }
                 }
@@ -259,22 +246,12 @@ impl Parser {
 
     fn parse_for(&mut self) {
         self.expect_keyword("for");
-        let iter_var = match self.peek() {
-            Some(Token::Identifier(id)) => { self.next(); id },
-            _ => panic!("Expected ID"),
-        };
+        let iter_var = match self.peek() { Some(Token::Identifier(id)) => { self.next(); id }, _ => panic!() };
         self.expect_keyword("in");
-        
-        let filepath = match self.peek() {
-            Some(Token::StringLiteral(s)) => { self.next(); s },
-            _ => panic!("Expected File String"),
-        };
-        
-        if let Some(Token::Punctuation(p)) = self.peek() { 
-            if p == ":" { self.next(); } 
-        }
+        let filepath = match self.peek() { Some(Token::StringLiteral(s)) => { self.next(); s }, _ => panic!() };
+        if let Some(Token::Punctuation(p)) = self.peek() { if p == ":" { self.next(); } }
 
-        let file_content = fs::read_to_string(&filepath).expect(&format!("[ERR_FILE_NULL_0x05] File '{}' missing.", filepath));
+        let file_content = fs::read_to_string(&filepath).unwrap();
         let lines: Vec<&str> = file_content.lines().filter(|l| !l.trim().is_empty()).collect();
         let block_start = self.pos;
 
@@ -286,11 +263,9 @@ impl Parser {
                 if let Token::Keyword(k) = tok {
                     if k == "end" { break; }
                     match k.as_str() {
-                        "set" => self.parse_assignment(),
-                        "log" => self.parse_log(),
-                        "scan" => self.parse_scan(),
-                        "payload" => self.parse_payload(),
-                        _ => self.next(),
+                        "set" => self.parse_assignment(), "log" => self.parse_log(),
+                        "scan" => self.parse_scan(), "payload" => self.parse_payload(),
+                        "swarm" => self.parse_swarm(), _ => self.next(),
                     }
                 } else { self.next(); }
             }
@@ -304,41 +279,76 @@ impl Parser {
     }
 
     // --- OFFENSIVE ARSENAL ---
+    
+    // NEW: THE ASYNC SWARM ENGINE
+    fn parse_swarm(&mut self) {
+        self.expect_keyword("swarm");
+        let target_var = match self.peek() { Some(Token::Identifier(id)) => { self.next(); id }, _ => panic!() };
+        
+        self.expect_keyword("ports");
+        let start_port = match self.parse_factor() { Value::Num(n) => n as u16, _ => panic!() };
+        
+        self.expect_keyword("to");
+        let end_port = match self.parse_factor() { Value::Num(n) => n as u16, _ => panic!() };
+        
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+
+        let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
+        let total_ports = end_port - start_port + 1;
+        
+        println!("\n[⚡] INITIATING TOKIO ASYNC SWARM...");
+        println!("[⚡] TARGET: {} | DEPLOYING {} CONCURRENT THREADS", ip, total_ports);
+        
+        // Spin up the isolated Asynchronous Runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut handles = vec![];
+
+            for port in start_port..=end_port {
+                let target_ip = ip.clone();
+                // Spawn a new green-thread for every single port
+                handles.push(tokio::spawn(async move {
+                    let addr = format!("{}:{}", target_ip, port);
+                    // 300ms aggressive timeout
+                    if let Ok(_) = tokio::time::timeout(
+                        Duration::from_millis(300), 
+                        tokio::net::TcpStream::connect(&addr)
+                    ).await {
+                        println!("  --> [!] PORT {} IS OPEN", port);
+                    }
+                }));
+            }
+
+            // Await all threads to finish their strikes simultaneously
+            for handle in handles {
+                let _ = handle.await;
+            }
+        });
+        
+        println!("[⚡] SWARM COMPLETE. MEMORY RELEASED.\n");
+    }
+
     fn parse_scan(&mut self) {
         self.expect_keyword("scan");
-        let target = match self.peek() {
-            Some(Token::Identifier(id)) => { self.next(); id }
-            _ => panic!("Expected target ID"),
-        };
+        let target = match self.peek() { Some(Token::Identifier(id)) => { self.next(); id } _ => panic!() };
         if let Some(Token::Punctuation(p)) = self.peek() { if p == ":" { self.next(); } }
 
-        let ip = match self.memory.get(&target) {
-            Some(Value::Str(s)) => s.clone(),
-            _ => panic!("[ERR_MEM_NULL_0x02] No IP found."),
-        };
-        
-        let port = match self.memory.get("port") {
-            Some(Value::Num(p)) => *p as u16,
-            _ => 80, // Default fallback
-        };
+        let ip = match self.memory.get(&target) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
+        let port = match self.memory.get("port") { Some(Value::Num(p)) => *p as u16, _ => 80 };
 
         let address = format!("{}:{}", ip, port);
         let mut is_open = false;
         
-        // Native OS-level TCP Socket connection
         if let Ok(addresses) = address.to_socket_addrs() {
             if let Some(addr) = addresses.filter(|a| a.is_ipv4()).next() {
-                if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-                    is_open = true;
-                }
+                if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() { is_open = true; }
             }
         }
 
         while let Some(tok) = self.peek() {
             if let Token::Keyword(k) = tok {
                 if k == "end" { break; }
-                if k == "if" { self.parse_if(is_open); }
-                else { self.next(); }
+                if k == "if" { self.parse_if(is_open); } else { self.next(); }
             } else { self.next(); }
         }
         self.expect_keyword("end");
@@ -346,7 +356,7 @@ impl Parser {
 
     fn parse_if(&mut self, condition: bool) {
         self.expect_keyword("if");
-        if let Some(Token::Identifier(_)) = self.peek() { self.next(); } // Match "open"
+        if let Some(Token::Identifier(_)) = self.peek() { self.next(); } 
         if let Some(Token::Punctuation(_)) = self.peek() { self.next(); }
 
         while let Some(tok) = self.peek() {
@@ -354,9 +364,8 @@ impl Parser {
                 if k == "end" { break; }
                 if condition {
                     match k.as_str() {
-                        "set" => self.parse_assignment(),
-                        "log" => self.parse_log(),
-                        "payload" => self.parse_payload(),
+                        "set" => self.parse_assignment(), "log" => self.parse_log(),
+                        "payload" => self.parse_payload(), "swarm" => self.parse_swarm(),
                         _ => self.next(),
                     }
                 } else { self.next(); }
@@ -370,34 +379,22 @@ impl Parser {
         let target_var = match self.peek() { Some(Token::Identifier(id)) => { self.next(); id }, _ => panic!() };
         let port_var = match self.peek() { Some(Token::Identifier(id)) => { self.next(); id }, _ => panic!() };
         
-        let raw_payload = match self.peek() { 
-            Some(Token::StringLiteral(s)) => { self.next(); s }, 
-            _ => panic!() 
-        };
-        
+        let raw_payload = match self.peek() { Some(Token::StringLiteral(s)) => { self.next(); s }, _ => panic!() };
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
 
         let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s, _ => panic!() };
         let port = match self.memory.get(&port_var) { Some(Value::Num(n)) => *n as u16, _ => panic!() };
         let formatted_payload = raw_payload.replace("\\r\\n", "\r\n").replace("\\n", "\n");
 
-        // ... (keep the top of parse_payload exactly the same)
         println!("\n[!] FIRING RAW BYTES AT {}:{}...", ip, port);
         let address = format!("{}:{}", ip, port);
 
         if let Ok(mut stream) = TcpStream::connect_timeout(&address.parse().unwrap(), Duration::from_secs(2)) {
-            // 1. Slap a strict 2-second timeout on reading so the engine never hangs
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            
-            // 2. Fire the payload
             let _ = stream.write_all(formatted_payload.as_bytes());
             
-            // 3. Create a raw 4KB memory buffer (Exactly like Python's recv(4096))
             let mut buffer = [0; 4096];
-            
-            // 4. Read whatever is immediately available into the buffer and run
             if let Ok(bytes_read) = stream.read(&mut buffer) {
-                // Convert the raw bytes back into human-readable text
                 let response = String::from_utf8_lossy(&buffer[..bytes_read]);
                 println!(">>> SERVER RESPONSE CAUGHT:\n{}\n", response);
             }

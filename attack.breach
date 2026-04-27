@@ -1,15 +1,7 @@
 set target = 1.1.1.1;
-set port = 80;
 
-log "--- BREACH PROTOCOL INITIATED ---";
-log "Scanning target:";
-log target;
+log "--- INITIATING MASS SUBNET SWEEP ---";
 
-scan target:
-    if open:
-        log "[!] PORT 80 CONFIRMED OPEN. Executing payload...";
-        payload target port "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\n\r\n";
-    end
-end
+swarm target ports 1 to 80;
 
-log "--- PROTOCOL COMPLETE ---";
+log "--- SWEEP COMPLETE ---";
