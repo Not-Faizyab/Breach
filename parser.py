@@ -34,18 +34,19 @@ class Parser:
                 self.parse_log()
             elif token[0] == 'KEYWORD' and token[1] == 'scan':
                 self.parse_scan()
+            elif token[0] == 'KEYWORD' and token[1] == 'while':
+                self.parse_while()
             else:
                 self.pos += 1 
 
     # --- MATH & LOGIC ENGINE PIPELINE ---
+    # (Kept exactly the same as your flawless run)
 
     def parse_assignment(self):
-        # Handle syntax: set [var] = [expression];
         self.match('KEYWORD')               
         var_name = self.match('ID')[1]      
         self.match('ASSIGN')                
         
-        # Route through the logic engine first. If no logic exists, it falls through to math.
         final_value = self.parse_condition()
         self.memory[var_name] = final_value
             
@@ -53,8 +54,6 @@ class Parser:
         print(f"[Memory] {var_name} = {self.memory[var_name]}")
 
     def parse_condition(self):
-        # TIER 0: Boolean Logic (<, >, ==, !=)
-        # Evaluate standard math expressions first to establish base values
         left_side = self.parse_expression()
 
         token = self.peek()
@@ -62,7 +61,6 @@ class Parser:
             op = self.match('COMP')[1]
             right_side = self.parse_expression()
 
-            # Execute Python native comparison
             if op == '<':
                 return left_side < right_side
             elif op == '>':
@@ -76,73 +74,51 @@ class Parser:
             elif op == '>=':
                 return left_side >= right_side
 
-        # If no comparison operator exists, just return the math result
         return left_side
 
     def parse_expression(self):
-        # TIER 1: Addition and Subtraction
-        # Process terms (multiplication/division) first to enforce PEMDAS
         result = self.parse_term()
-        
-        # Chain addition/subtraction operations
         while self.peek() and self.peek()[0] == 'OP' and self.peek()[1] in ['+', '-']:
             op = self.match('OP')[1]
             right_side = self.parse_term()
-            
             if op == '+':
                 result = result + right_side
             elif op == '-':
                 result = result - right_side
-                
         return result
 
     def parse_term(self):
-        # TIER 2: Multiplication and Division
-        # Extract raw factors first
         result = self.parse_factor()
-        
-        # Execute multiplication/division immediately
         while self.peek() and self.peek()[0] == 'OP' and self.peek()[1] in ['*', '/']:
             op = self.match('OP')[1]
             right_side = self.parse_factor()
-            
             if op == '*':
                 result = result * right_side
             elif op == '/':
                 result = result / right_side
-                
         return result
 
     def parse_factor(self):
-        # TIER 3: Raw Materials (Numbers, Strings, IPs, Variables, Booleans)
         token = self.peek()
-        
         if token[0] == 'NUMBER':
             self.match('NUMBER')
-            # Convert string token to Python float/int for computation
             return float(token[1]) if '.' in token[1] else int(token[1])
-            
         elif token[0] == 'ID':
             self.match('ID')
             var_name = token[1]
-            # Pull variable value from RAM
             if var_name in self.memory:
                 return self.memory[var_name]
             raise RuntimeError(f"Fatal: Variable '{var_name}' does not exist in memory.")
-                
         elif token[0] in ['TYPE_IP', 'STRING']:
-            # Bypass math evaluation for raw strings and IP addresses
             self.match(token[0])
             return token[1]
-            
         raise SyntaxError(f"Syntax Error: Expected a valid data type, found '{token}'")
+
 
     # --- SYSTEM COMMANDS ---
 
     def parse_log(self):
         self.match('KEYWORD')   
-        
-        # Support printing both raw strings and active memory variables
         token = self.peek()
         if token[0] == 'STRING':
             message = self.match('STRING')[1].strip('"')
@@ -150,29 +126,122 @@ class Parser:
         elif token[0] == 'ID':
             var_name = self.match('ID')[1]
             print(f"> {self.memory.get(var_name, 'UNDEFINED')}")
-            
         self.match('DELIM')                 
 
     def parse_scan(self):
-        # ... (Skipping scan/if logic printout to save space, keep your existing one!)
-        pass
+        # We upgraded this so it can scan dynamically assigned ports!
+        self.match('KEYWORD')               
+        target_var = self.match('ID')[1]    
+        self.match('PUNCT')                 
+        
+        ip_to_scan = self.memory.get(target_var)
+        target_port = int(self.memory.get('port', 80)) # Default to 80 if 'port' isn't set
+        
+        print(f"[*] Sweeping {ip_to_scan} on Port {target_port}...")
+        
+        is_open = False
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2) # Faster timeout for sweeps
+            if s.connect_ex((ip_to_scan, target_port)) == 0:
+                is_open = True
+            s.close()
+        except Exception:
+            pass
+
+        while self.peek() and self.peek()[1] != 'end':
+            token = self.peek()
+            if token[0] == 'KEYWORD' and token[1] == 'if':
+                self.parse_if(is_open) 
+            else:
+                self.pos += 1 
+
+        self.match('KEYWORD') 
+
+    def parse_if(self, condition):
+        self.match('KEYWORD')   
+        self.match('ID')        
+        self.match('PUNCT')     
+        
+        while self.peek() and self.peek()[1] != 'end':
+            if condition:
+                token = self.peek()
+                if token[0] == 'KEYWORD' and token[1] == 'log':
+                    self.parse_log()
+                elif token[0] == 'KEYWORD' and token[1] == 'set':
+                    self.parse_assignment()
+                else:
+                    self.pos += 1
+            else:
+                self.pos += 1
+                
+        self.match('KEYWORD') 
+
+    # --- THE TIME MACHINE ---
+
+    def parse_while(self):
+        # Handle syntax: while [condition]: [block] end
+        self.match('KEYWORD')   
+        
+        # Mark timeline coordinates before evaluating reality
+        condition_start_pos = self.pos 
+        
+        while True:
+            # Always reset timeline to start before evaluating condition
+            self.pos = condition_start_pos
+            condition_is_true = self.parse_condition()
+            self.match('PUNCT')     
+            
+            if condition_is_true:
+                # Execute payload inside the loop
+                while self.peek() and self.peek()[1] != 'end':
+                    token = self.peek()
+                    if token[0] == 'KEYWORD' and token[1] == 'set':
+                        self.parse_assignment()
+                    elif token[0] == 'KEYWORD' and token[1] == 'log':
+                        self.parse_log()
+                    elif token[0] == 'KEYWORD' and token[1] == 'scan':
+                        self.parse_scan()
+                    else:
+                        self.pos += 1
+                
+                # We hit 'end'. Do NOT consume it, let Python restart the while loop to rewind time.
+            else:
+                # Reality is False. Fast-forward through tokens until block ends.
+                while self.peek() and self.peek()[1] != 'end':
+                    self.pos += 1
+                    
+                # Consume 'end' to break the loop and continue execution
+                self.match('KEYWORD') 
+                break
 
 
 if __name__ == "__main__":
-    # Stress test for Boolean Logic
+    # THE ULTIMATE TEST: A Full Subnet/Port Sweep
     script = """
-    set current_port = 80;
-    set max_port = 100;
+    set target_ip = 1.1.1.1;
+    set port = 80;
+    set max_port = 83;
     
-    set is_valid_target = current_port < max_port;
-    set is_complete = current_port == 100;
+    log "Commencing Port Sweep...";
     
-    log "Is target valid for scanning?";
-    log is_valid_target;
+    while port < max_port:
+        log "Scanning:";
+        log port;
+        
+        scan target_ip:
+            if open:
+                log "CRITICAL: Port is vulnerable!";
+            end
+        end
+        
+        set port = port + 1;
+    end
     
-    log "Is sweep complete?";
-    log is_complete;
+    log "Sweep terminated.";
     """
 
+    print("\n[!] INITIATING BREACH ENGINE")
     parser = Parser(lexer(script))
     parser.parse()
+    print("[!] ENGINE SHUTDOWN\n")
