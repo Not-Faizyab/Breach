@@ -43,8 +43,8 @@ fn lexer(code: &str) -> Vec<Token> {
     let token_rules = vec![
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        // ADDED: transmit
-        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit)\b"),
+        // ADDED: import
+        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
@@ -116,11 +116,7 @@ fn mutate_token_stream(tokens: Vec<Token>) -> Vec<Token> {
 }
 
 fn format_address(ip: &str, port: u16) -> String {
-    if ip.contains(':') { 
-        format!("[{}]:{}", ip, port) 
-    } else { 
-        format!("{}:{}", ip, port)   
-    }
+    if ip.contains(':') { format!("[{}]:{}", ip, port) } else { format!("{}:{}", ip, port) }
 }
 
 // =====================================================================
@@ -136,12 +132,7 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self { 
-        Parser { 
-            tokens, 
-            pos: 0, 
-            memory: HashMap::new(), 
-            functions: HashMap::new() 
-        } 
+        Parser { tokens, pos: 0, memory: HashMap::new(), functions: HashMap::new() } 
     }
     
     fn peek(&self) -> Option<Token> { self.tokens.get(self.pos).cloned() }
@@ -149,10 +140,7 @@ impl Parser {
     
     fn expect_keyword(&mut self, kw: &str) {
         if let Some(Token::Keyword(k)) = self.peek() { 
-            if k == kw { 
-                self.next(); 
-                return; 
-            } 
+            if k == kw { self.next(); return; } 
         }
         panic!("[RUNTIME_ERROR] Expected keyword '{}' at position {}.", kw, self.pos);
     }
@@ -171,7 +159,8 @@ impl Parser {
                 "scan" => self.parse_scan(),
                 "swarm" => self.parse_swarm(),
                 "payload" => self.parse_payload(),
-                "transmit" => self.parse_transmit(), // ROUTED
+                "transmit" => self.parse_transmit(), 
+                "import" => self.parse_import(), // ROUTED NEW FEATURE
                 "while" => self.parse_while(),
                 "for" => self.parse_for(),
                 "if" => self.parse_if(true),
@@ -190,25 +179,55 @@ impl Parser {
         }
     }
 
+    // =====================================================================
+    // --- NEW: ECOSYSTEM MODULARITY (IMPORT) ---
+    // =====================================================================
+
+    fn parse_import(&mut self) {
+        self.expect_keyword("import");
+        
+        let filename = if let Value::Str(s) = self.parse_factor() { s } else { panic!("[SYNTAX_ERR] Import requires a string filename."); };
+        
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        
+        println!("[*] Linking external module: {}", filename);
+        
+        let imported_code = fs::read_to_string(&filename).unwrap_or_else(|_| {
+            panic!("[!] FATAL: Failed to read imported file '{}'", filename);
+        });
+        
+        let imported_tokens = lexer(&imported_code);
+        let mutated_imported = mutate_token_stream(imported_tokens);
+        
+        // Spin up a sub-parser and inject our current memory/functions into it
+        let mut module_parser = Parser::new(mutated_imported);
+        module_parser.memory = self.memory.clone();
+        module_parser.functions = self.functions.clone();
+        
+        // Execute the imported file
+        module_parser.parse();
+        
+        // Pull the updated memory and functions back into our main context
+        self.memory = module_parser.memory;
+        self.functions = module_parser.functions;
+        
+        println!("[+] Link successful. Context synchronized.");
+    }
+
     // --- LOGIC & ASSIGNMENTS ---
 
     fn parse_assignment(&mut self) {
         self.expect_keyword("set");
-        
         let var_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Assign) = self.peek() { self.next(); }
         
         let value = if let Some(Token::Keyword(k)) = self.peek() {
             match k.as_str() {
                 "list" => { self.next(); Value::List(Vec::new()) },
-                "rand" => self.parse_rand(),
-                "resolve" => self.parse_resolve(),
-                "input" => self.parse_input(),
+                "rand" => self.parse_rand(), "resolve" => self.parse_resolve(), "input" => self.parse_input(),
                 _ => self.parse_condition(),
             }
-        } else { 
-            self.parse_condition() 
-        };
+        } else { self.parse_condition() };
         
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
         self.memory.insert(var_name, value);
@@ -219,11 +238,8 @@ impl Parser {
     fn parse_resolve(&mut self) -> Value {
         self.expect_keyword("resolve");
         let host = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); };
-        
         if let Ok(mut addrs) = format!("{}:80", host).to_socket_addrs() {
-            if let Some(resolved_addr) = addrs.next() { 
-                return Value::Str(resolved_addr.ip().to_string()); 
-            }
+            if let Some(resolved_addr) = addrs.next() { return Value::Str(resolved_addr.ip().to_string()); }
         }
         Value::Str("0.0.0.0".to_string())
     }
@@ -231,36 +247,24 @@ impl Parser {
     fn parse_input(&mut self) -> Value {
         self.expect_keyword("input");
         let prompt_text = if let Value::Str(s) = self.parse_factor() { s } else { "".to_string() };
-        
-        print!("{}", prompt_text); 
-        let _ = io::stdout().flush();
-        
-        let mut user_input = String::new(); 
-        let _ = io::stdin().read_line(&mut user_input);
-        
+        print!("{}", prompt_text); let _ = io::stdout().flush();
+        let mut user_input = String::new(); let _ = io::stdin().read_line(&mut user_input);
         Value::Str(user_input.trim().to_string())
     }
 
     fn parse_rand(&mut self) -> Value {
         self.expect_keyword("rand");
         let start_range = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 0 };
-        
         self.expect_keyword("to");
         let end_range = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 100 };
-        
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as i64;
-        let random_result = start_range + (seed % (end_range - start_range + 1).max(1));
-        
-        Value::Num(random_result as f64)
+        Value::Num((start_range + (seed % (end_range - start_range + 1).max(1))) as f64)
     }
 
     fn parse_log(&mut self) {
         self.expect_keyword("log");
         let log_value = match self.parse_condition() {
-            Value::Num(n) => n.to_string(), 
-            Value::Str(s) => s,
-            Value::Bool(b) => b.to_string(), 
-            Value::List(l) => format!("{:?}", l),
+            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l),
         };
         println!("{}", log_value);
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
@@ -316,11 +320,9 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> Value {
-        let token = self.peek().expect("Unexpected End of File"); 
-        self.next();
+        let token = self.peek().expect("Unexpected End of File"); self.next();
         match token {
-            Token::Number(n) => Value::Num(n),
-            Token::StringLiteral(s) | Token::IpAddress(s) => Value::Str(s),
+            Token::Number(n) => Value::Num(n), Token::StringLiteral(s) | Token::IpAddress(s) => Value::Str(s),
             Token::Identifier(id) => self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)),
             _ => panic!("Invalid factor type"),
         }
@@ -332,10 +334,7 @@ impl Parser {
         self.expect_keyword("op");
         let op_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        
-        let mut op_body = Vec::new(); 
-        let mut block_depth = 1;
-        
+        let mut op_body = Vec::new(); let mut block_depth = 1;
         while let Some(token) = self.peek() {
             self.next();
             if let Token::Keyword(ref k) = token {
@@ -351,13 +350,10 @@ impl Parser {
         self.expect_keyword("call");
         let op_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        
         if let Some(function_body) = self.functions.get(&op_name).cloned() {
             let mut sub_parser = Parser::new(function_body); 
-            sub_parser.memory = self.memory.clone();
-            sub_parser.functions = self.functions.clone(); 
-            sub_parser.parse(); 
-            self.memory = sub_parser.memory; 
+            sub_parser.memory = self.memory.clone(); sub_parser.functions = self.functions.clone(); 
+            sub_parser.parse(); self.memory = sub_parser.memory; 
         }
     }
 
@@ -367,17 +363,12 @@ impl Parser {
         self.expect_keyword("scan");
         let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        
         let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
         let port = match self.memory.get("port") { Some(Value::Num(p)) => *p as u16, _ => 80 };
         let address = format_address(&ip, port);
-        
         let is_open = if let Ok(mut resolved_addrs) = address.to_socket_addrs() {
-            if let Some(final_addr) = resolved_addrs.next() {
-                TcpStream::connect_timeout(&final_addr, Duration::from_millis(500)).is_ok()
-            } else { false }
+            if let Some(final_addr) = resolved_addrs.next() { TcpStream::connect_timeout(&final_addr, Duration::from_millis(500)).is_ok() } else { false }
         } else { false };
-        
         self.parse_if(is_open);
     }
 
@@ -390,8 +381,7 @@ impl Parser {
         let end_port = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
         
-        let mut swarm_body = Vec::new(); 
-        let mut block_depth = 1;
+        let mut swarm_body = Vec::new(); let mut block_depth = 1;
         while let Some(token) = self.peek() {
             self.next();
             if let Token::Keyword(ref k) = token {
@@ -402,30 +392,24 @@ impl Parser {
         }
         
         let ip_target = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
-        let memory_snapshot = self.memory.clone();
-        let functions_snapshot = self.functions.clone();
+        let memory_snapshot = self.memory.clone(); let functions_snapshot = self.functions.clone();
         
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut thread_handles = vec![];
             for port in start_port..=end_port {
-                let current_ip = ip_target.clone();
-                let inner_code = swarm_body.clone();
-                let mut local_memory = memory_snapshot.clone();
-                let local_functions = functions_snapshot.clone();
+                let current_ip = ip_target.clone(); let inner_code = swarm_body.clone();
+                let mut local_memory = memory_snapshot.clone(); let local_functions = functions_snapshot.clone();
                 
                 thread_handles.push(tokio::task::spawn_blocking(move || {
                     let formatted_address = format_address(&current_ip, port);
                     let is_port_open = if let Ok(mut resolved) = formatted_address.to_socket_addrs() {
-                        if let Some(addr) = resolved.next() {
-                            TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
-                        } else { false }
+                        if let Some(addr) = resolved.next() { TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok() } else { false }
                     } else { false };
                     
                     local_memory.insert("port".to_string(), Value::Num(port as f64));
                     let mut isolated_parser = Parser::new(inner_code); 
-                    isolated_parser.memory = local_memory; 
-                    isolated_parser.functions = local_functions;
+                    isolated_parser.memory = local_memory; isolated_parser.functions = local_functions;
                     isolated_parser.execute_swarm_block(is_port_open);
                 }));
             }
@@ -456,7 +440,6 @@ impl Parser {
                 if let Ok(mut stream) = TcpStream::connect_timeout(&final_addr, Duration::from_secs(1)) {
                     let formatted_data = raw_payload.replace("\\n", "\n").replace("\\r", "\r");
                     let _ = stream.write_all(formatted_data.as_bytes());
-                    
                     let mut buffer = [0; 4096];
                     if let Ok(bytes_read) = stream.read(&mut buffer) { 
                         if bytes_read > 0 { println!("{}", String::from_utf8_lossy(&buffer[..bytes_read]).trim()); } 
@@ -466,42 +449,24 @@ impl Parser {
         }
     }
 
-    // --- NEW: CLOUD EXFILTRATION (TRANSMIT) ---
-
     fn parse_transmit(&mut self) {
         self.expect_keyword("transmit");
-        
-        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        let port_var = if let Some(Token::Identifier(id)) = self.peek() { 
-            self.next(); id 
-        } else if let Some(Token::Number(n)) = self.peek() { 
-            self.next(); n.to_string() 
-        } else { panic!(); };
-        
+        let url_val = self.parse_factor();
         let data_to_send = match self.parse_factor() {
-            Value::Num(n) => n.to_string(),
-            Value::Str(s) => s,
-            Value::Bool(b) => b.to_string(),
-            Value::List(l) => format!("{:?}", l),
+            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l),
         };
-        
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        let url = if let Value::Str(s) = url_val { s } else { panic!("[RUNTIME_ERR] Transmit requires a valid URL."); };
         
-        let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => target_var.clone() };
-        let port = match self.memory.get(&port_var) { Some(Value::Num(n)) => *n as u16, _ => port_var.parse().unwrap_or(80) };
-        let address = format_address(&ip, port);
-        
-        // Fire-and-forget HTTP POST exfiltration
-        if let Ok(mut resolved_addrs) = address.to_socket_addrs() {
-            if let Some(final_addr) = resolved_addrs.next() {
-                // Short timeout. We send the data and vanish.
-                if let Ok(mut stream) = TcpStream::connect_timeout(&final_addr, Duration::from_millis(300)) {
-                    let post_request = format!(
-                        "POST / HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", 
-                        ip, data_to_send.len(), data_to_send
-                    );
-                    let _ = stream.write_all(post_request.as_bytes());
-                }
+        println!("[*] Establishing secure TLS tunnel to target...");
+        if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build() {
+            let mut json_payload = HashMap::new(); json_payload.insert("content", data_to_send);
+            match client.post(&url).json(&json_payload).send() {
+                Ok(response) => {
+                    if response.status().is_success() { println!("[+] EXFILTRATION SUCCESS (Status: {})", response.status()); } 
+                    else { println!("[-] EXFILTRATION REJECTED (Status: {})", response.status()); }
+                },
+                Err(e) => println!("[!] NETWORK FATAL: {}", e),
             }
         }
     }
@@ -584,38 +549,19 @@ impl Parser {
     }
 
     fn parse_wait(&mut self) { 
-        self.expect_keyword("wait"); 
-        let ms_delay = if let Value::Num(n) = self.parse_factor() { n as u64 } else { 0 }; 
-        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
-        thread::sleep(Duration::from_millis(ms_delay)); 
+        self.expect_keyword("wait"); let ms_delay = if let Value::Num(n) = self.parse_factor() { n as u64 } else { 0 }; if let Some(Token::Delimiter) = self.peek() { self.next(); } thread::sleep(Duration::from_millis(ms_delay)); 
     }
 
     fn parse_file_operation(&mut self, is_append: bool) { 
-        self.next(); 
-        let filepath = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); }; 
-        let content_to_write = match self.parse_factor() { 
-            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l), 
-        }; 
-        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
-        let mut file_options = OpenOptions::new(); 
-        file_options.write(true).create(true); 
-        if is_append { file_options.append(true); } else { file_options.truncate(true); } 
-        if let Ok(mut file) = file_options.open(filepath) { let _ = writeln!(file, "{}", content_to_write); } 
+        self.next(); let filepath = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); }; let content_to_write = match self.parse_factor() { Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l), }; if let Some(Token::Delimiter) = self.peek() { self.next(); } let mut file_options = OpenOptions::new(); file_options.write(true).create(true); if is_append { file_options.append(true); } else { file_options.truncate(true); } if let Ok(mut file) = file_options.open(filepath) { let _ = writeln!(file, "{}", content_to_write); } 
     }
 
     fn parse_list_push(&mut self) { 
-        self.expect_keyword("push"); 
-        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; 
-        let value_to_add = self.parse_factor(); 
-        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
-        if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { internal_list.push(value_to_add); } 
+        self.expect_keyword("push"); let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; let value_to_add = self.parse_factor(); if let Some(Token::Delimiter) = self.peek() { self.next(); } if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { internal_list.push(value_to_add); } 
     }
 
     fn parse_list_pop(&mut self) { 
-        self.expect_keyword("pop"); 
-        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; 
-        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
-        if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { internal_list.pop(); } 
+        self.expect_keyword("pop"); let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; if let Some(Token::Delimiter) = self.peek() { self.next(); } if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { internal_list.pop(); } 
     }
 }
 

