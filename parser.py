@@ -1,5 +1,6 @@
+import sys
 import socket
-from lexer import lexer 
+from lexer import lexer
 
 class Parser:
     def __init__(self, tokens):
@@ -243,19 +244,32 @@ class Parser:
 
 
 if __name__ == "__main__":
-    # THE ULTIMATE TEST: File Iteration
-    script = r"""
-    log "Loading wordlist from disk...";
-    
-    for endpoint in "paths.txt":
-        log "Attempting directory:";
-        log endpoint;
-    end
-    
-    log "Wordlist exhausted.";
-    """
+    # The Command Line Interface (CLI) Loader
+    if len(sys.argv) < 2:
+        print("[!] FATAL: No payload provided.")
+        print("[?] Usage: python parser.py <script.breach>")
+        sys.exit(1)
 
-    print("\n[!] INITIATING BREACH ENGINE")
-    parser = Parser(lexer(script))
-    parser.parse()
-    print("[!] ENGINE SHUTDOWN\n")
+    target_file = sys.argv[1]
+
+    # THE GATEKEEPER: Enforce the .breach extension
+    if not target_file.endswith('.breach'):
+        print(f"[ERR_SYS_INVALID_EXT_0x06] File '{target_file}' rejected. Engine strictly requires a '.breach' payload.")
+        sys.exit(1)
+
+    try:
+        with open(target_file, 'r') as f:
+            source_code = f.read()
+    except FileNotFoundError:
+        print(f"[ERR_FILE_NULL_0x05] Target script '{target_file}' not found on disk.")
+        sys.exit(1)
+
+    print(f"\n[!] INITIATING BREACH ENGINE v1.0")
+    print(f"[*] Compiling payload: {target_file}\n")
+    
+    try:
+        parser = Parser(lexer(source_code))
+        parser.parse()
+        print("\n[!] ENGINE SHUTDOWN: CLEAN EXIT")
+    except Exception as e:
+        print(f"\n[X] CORE PANIC: {e}")
