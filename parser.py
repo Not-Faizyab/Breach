@@ -37,20 +37,47 @@ class Parser:
             else:
                 self.pos += 1 
 
-    # --- MATH ENGINE PIPELINE ---
+    # --- MATH & LOGIC ENGINE PIPELINE ---
 
     def parse_assignment(self):
-        # Handle syntax: set [var] = [math_expression];
+        # Handle syntax: set [var] = [expression];
         self.match('KEYWORD')               
         var_name = self.match('ID')[1]      
         self.match('ASSIGN')                
         
-        # Evaluate full mathematical expression before assigning to memory
-        final_value = self.parse_expression()
+        # Route through the logic engine first. If no logic exists, it falls through to math.
+        final_value = self.parse_condition()
         self.memory[var_name] = final_value
             
         self.match('DELIM')                 
         print(f"[Memory] {var_name} = {self.memory[var_name]}")
+
+    def parse_condition(self):
+        # TIER 0: Boolean Logic (<, >, ==, !=)
+        # Evaluate standard math expressions first to establish base values
+        left_side = self.parse_expression()
+
+        token = self.peek()
+        if token and token[0] == 'COMP':
+            op = self.match('COMP')[1]
+            right_side = self.parse_expression()
+
+            # Execute Python native comparison
+            if op == '<':
+                return left_side < right_side
+            elif op == '>':
+                return left_side > right_side
+            elif op == '==':
+                return left_side == right_side
+            elif op == '!=':
+                return left_side != right_side
+            elif op == '<=':
+                return left_side <= right_side
+            elif op == '>=':
+                return left_side >= right_side
+
+        # If no comparison operator exists, just return the math result
+        return left_side
 
     def parse_expression(self):
         # TIER 1: Addition and Subtraction
@@ -87,7 +114,7 @@ class Parser:
         return result
 
     def parse_factor(self):
-        # TIER 3: Raw Materials (Numbers, Strings, IPs, Variables)
+        # TIER 3: Raw Materials (Numbers, Strings, IPs, Variables, Booleans)
         token = self.peek()
         
         if token[0] == 'NUMBER':
@@ -127,68 +154,24 @@ class Parser:
         self.match('DELIM')                 
 
     def parse_scan(self):
-        self.match('KEYWORD')               
-        target_var = self.match('ID')[1]    
-        self.match('PUNCT')                 
-        
-        # Fetch target IP from RAM
-        ip_to_scan = self.memory.get(target_var)
-        if not ip_to_scan:
-            raise RuntimeError(f"Fatal: No IP assigned to '{target_var}'")
-
-        print(f"\n[*] Sweeping {ip_to_scan} (Port 80)...")
-        
-        # Execute native socket connection to test real-world port status
-        is_open = False
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5) 
-            if s.connect_ex((ip_to_scan, 80)) == 0:
-                is_open = True
-            s.close()
-        except Exception:
-            pass
-
-        # Parse internal block until 'end' keyword is detected
-        while self.peek() and self.peek()[1] != 'end':
-            token = self.peek()
-            if token[0] == 'KEYWORD' and token[1] == 'if':
-                self.parse_if(is_open) 
-            else:
-                self.pos += 1 
-
-        self.match('KEYWORD') 
-
-    def parse_if(self, condition):
-        self.match('KEYWORD')   
-        self.match('ID')        
-        self.match('PUNCT')     
-        
-        # Execute block if condition resolves to True; otherwise, skip tokens
-        while self.peek() and self.peek()[1] != 'end':
-            if condition:
-                token = self.peek()
-                if token[0] == 'KEYWORD' and token[1] == 'log':
-                    self.parse_log()
-                elif token[0] == 'KEYWORD' and token[1] == 'set':
-                    self.parse_assignment()
-                else:
-                    self.pos += 1
-            else:
-                self.pos += 1
-                
-        self.match('KEYWORD') 
+        # ... (Skipping scan/if logic printout to save space, keep your existing one!)
+        pass
 
 
 if __name__ == "__main__":
-    # Stress test for mathematical expression parsing
+    # Stress test for Boolean Logic
     script = """
-    set base_port = 80;
-    set offset = 5 * 2;
-    set target_port = base_port + offset;
+    set current_port = 80;
+    set max_port = 100;
     
-    log "Calculated target port:";
-    log target_port;
+    set is_valid_target = current_port < max_port;
+    set is_complete = current_port == 100;
+    
+    log "Is target valid for scanning?";
+    log is_valid_target;
+    
+    log "Is sweep complete?";
+    log is_complete;
     """
 
     parser = Parser(lexer(script))

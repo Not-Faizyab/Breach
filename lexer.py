@@ -1,20 +1,21 @@
 import re
 
 def lexer(code_string):
-    # 1. Define the rules of our universe (Order matters!)
+    # Define rules of the universe (Order matters!)
     token_specification = [
-        ('TYPE_IP',  r'\b(?:\d{1,3}\.){3}\d{1,3}\b'),              # Matches IPs like 192.168.1.1
-        ('NUMBER',   r'\d+(\.\d*)?'),                              # Standard numbers
-        ('KEYWORD',  r'\b(?:set|scan|strike|payload|if|end|log)\b'), # Custom hacker arsenal
-        ('ID',       r'[a-zA-Z_][a-zA-Z0-9_]*'),                   # Variable names
-        ('ASSIGN',   r'='),                                        # The equals sign
-        ('OP',       r'[+\-*/]'),                                  # Math operators
-        ('STRING',   r'".*?"'),                                    # Text wrapped in quotes (e.g. "Breach point found")
-        ('DELIM',    r';'),                                        # Semicolons to end lines
-        ('PUNCT',    r'[{}:,]'),                                   # Braces, colons, and commas
-        ('NEWLINE',  r'\n'),                                       # Line endings
-        ('SKIP',     r'[ \t]+'),                                   # Skip spaces
-        ('MISMATCH', r'.'),                                        # Syntax Error catcher
+        ('TYPE_IP',  r'\b(?:\d{1,3}\.){3}\d{1,3}\b'),              
+        ('NUMBER',   r'\d+(\.\d*)?'),                              
+        ('KEYWORD',  r'\b(?:set|scan|strike|payload|if|while|end|log)\b'), 
+        ('ID',       r'[a-zA-Z_][a-zA-Z0-9_]*'),                   
+        ('COMP',     r'==|!=|<=|>=|<|>'),                        
+        ('ASSIGN',   r'='),                                        
+        ('OP',       r'[+\-*/]'),                                  
+        ('STRING',   r'".*?"'),                                    
+        ('DELIM',    r';'),                                        
+        ('PUNCT',    r'[{}:,]'),                                   
+        ('NEWLINE',  r'\n'),                                       
+        ('SKIP',     r'[ \t]+'),                                   
+        ('MISMATCH', r'.'),                                        
     ]
     
     # 2. Mash all these rules into one giant Regex machine
