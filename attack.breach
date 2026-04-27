@@ -1,7 +1,11 @@
 set target = 1.1.1.1;
 
-log "--- INITIATING MASS SUBNET SWEEP ---";
+log "--- DEPLOYING COMPOSITIONAL SWARM ---";
 
-swarm target ports 1 to 80;
-
-log "--- SWEEP COMPLETE ---";
+swarm target ports 1 to 500:
+    if open:
+        log "[!] TARGET FOUND. Executing Payload on Port:";
+        log port;
+        payload target port "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\n\r\n";
+    end
+end
