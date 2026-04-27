@@ -27,6 +27,7 @@ class Parser:
             elif token[0] == 'KEYWORD' and token[1] == 'log': self.parse_log()
             elif token[0] == 'KEYWORD' and token[1] == 'scan': self.parse_scan()
             elif token[0] == 'KEYWORD' and token[1] == 'while': self.parse_while()
+            elif token[0] == 'KEYWORD' and token[1] == 'for': self.parse_for()
             elif token[0] == 'KEYWORD' and token[1] == 'payload': self.parse_payload()
             else: self.pos += 1 
 
@@ -162,6 +163,56 @@ class Parser:
                 self.match('KEYWORD') 
                 break
 
+    # --- THE FILE ITERATOR ---
+    def parse_for(self):
+        # Syntax: for [var] in "[filepath]":
+        self.match('KEYWORD')   
+        iterator_var = self.match('ID')[1]
+        self.match('KEYWORD')   
+        
+        file_path = self.match('STRING')[1].strip('"')
+        self.match('PUNCT')     
+        
+        # Reach into the OS and rip the lines from the file
+        try:
+            with open(file_path, 'r') as f:
+                # Read lines and strip out blank spaces/newlines
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+        except FileNotFoundError:
+            raise MemoryError(f"[ERR_FILE_NULL_0x05] File target '{file_path}' not found on disk.")
+
+        # Mark timeline coordinates
+        block_start_pos = self.pos 
+        
+        # If file is completely empty, bypass the block like
+        if not lines:
+            while self.peek() and self.peek()[1] != 'end':
+                self.pos += 1
+            self.match('KEYWORD')
+            return
+
+        # Execute the time machine for every line in the file
+        for current_line in lines:
+            # Inject current line from file directly into RAM
+            self.memory[iterator_var] = current_line
+            # Rewind timeline
+            self.pos = block_start_pos
+            
+            while self.peek() and self.peek()[1] != 'end':
+                token = self.peek()
+                if token[0] == 'KEYWORD' and token[1] == 'set': self.parse_assignment()
+                elif token[0] == 'KEYWORD' and token[1] == 'log': self.parse_log()
+                elif token[0] == 'KEYWORD' and token[1] == 'scan': self.parse_scan()
+                elif token[0] == 'KEYWORD' and token[1] == 'while': self.parse_while()
+                elif token[0] == 'KEYWORD' and token[1] == 'payload': self.parse_payload()
+                else: self.pos += 1
+                
+        # Fast-forward timeline to break out of the block once the file is exhausted
+        self.pos = block_start_pos
+        while self.peek() and self.peek()[1] != 'end':
+            self.pos += 1
+        self.match('KEYWORD')
+
     # --- OFFENSIVE ARSENAL ---
     def parse_payload(self):
         self.match('KEYWORD')
@@ -192,17 +243,16 @@ class Parser:
 
 
 if __name__ == "__main__":
-    # THE ULTIMATE TEST: The HTTP Interrogation
+    # THE ULTIMATE TEST: File Iteration
     script = r"""
-    set target_ip = 1.1.1.1;
-    set port = 80;
+    log "Loading wordlist from disk...";
     
-    scan target_ip:
-        if open:
-            log "Port 80 confirmed open. Firing HTTP GET payload...";
-            payload target_ip port "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\n\r\n";
-        end
+    for endpoint in "paths.txt":
+        log "Attempting directory:";
+        log endpoint;
     end
+    
+    log "Wordlist exhausted.";
     """
 
     print("\n[!] INITIATING BREACH ENGINE")
