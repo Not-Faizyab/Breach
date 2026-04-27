@@ -1,22 +1,14 @@
-set targets = list;
-push targets "1.1.1.1";
-push targets "8.8.8.8";
-
-log "--- INITIATING STEALTH SWARM ---";
-
-for target in targets:
-    set delay = rand 100 to 1000;
-    log "Jitter delay active (ms):";
-    log delay;
-    wait delay;
-
+op scan_and_log:
+    log "Initiating localized scan on: " + target;
     swarm target ports 1 to 100:
         if open:
-            append "found.log" target;
-            append "found.log" port;
-            log "[!] SUCCESS SAVED TO LOG";
+            log "[!] Verified Target Port: " + port;
         end
     end
 end
 
-log "--- SEQUENCE FINALIZED ---";
+set hostname = input "Enter Domain to Resolve: ";
+set target = resolve hostname;
+log "Resolved IP: " + target;
+
+call scan_and_log;

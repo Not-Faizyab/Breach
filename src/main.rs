@@ -2,18 +2,27 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write as StdWrite};
-use std::net::TcpStream;
+use std::io::{self, Read, Write as StdWrite};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// =====================================================================
 // --- CORE DATA ARCHITECTURE ---
+// =====================================================================
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Keyword(String), Identifier(String), Number(f64), IpAddress(String),
-    StringLiteral(String), Compare(String), Assign, Operator(String),
-    Delimiter, Punctuation(String),
+    Keyword(String),
+    Identifier(String),
+    Number(f64),
+    IpAddress(String),
+    StringLiteral(String),
+    Compare(String),
+    Assign,
+    Operator(String),
+    Delimiter,
+    Punctuation(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,14 +33,18 @@ enum Value {
     List(Vec<Value>) 
 }
 
-// --- LEXICAL ANALYSIS ---
+// =====================================================================
+// --- LEXICAL ANALYSIS ENGINE ---
+// =====================================================================
 
 fn lexer(code: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
+    
+    // The complete vocabulary of the Breach Language
     let token_rules = vec![
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand)\b"),
+        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
@@ -41,14 +54,26 @@ fn lexer(code: &str) -> Vec<Token> {
         ("PUNCT", r"[{}:,]"),
         ("SKIP", r"[ \t\n\r]+"),
     ];
-    let combined_regex = token_rules.iter().map(|(n, p)| format!("(?P<{}>{})", n, p)).collect::<Vec<_>>().join("|");
+
+    let combined_regex = token_rules
+        .iter()
+        .map(|(name, pattern)| format!("(?P<{}>{})", name, pattern))
+        .collect::<Vec<_>>()
+        .join("|");
+        
     let re = Regex::new(&combined_regex).unwrap();
     let mut last_end = 0;
+
     for caps in re.captures_iter(code) {
         let m = caps.get(0).unwrap();
-        if m.start() > last_end { panic!("[FATAL] Lexer failure at offset {}.", last_end); }
+        
+        if m.start() > last_end { 
+            panic!("[FATAL] Lexer failure at offset {}. Invalid syntax.", last_end); 
+        }
         last_end = m.end();
+        
         let val = m.as_str().to_string();
+        
         if caps.name("SKIP").is_some() { continue; }
         else if caps.name("KEYWORD").is_some() { tokens.push(Token::Keyword(val)); }
         else if caps.name("TYPE_IP").is_some() { tokens.push(Token::IpAddress(val)); }
@@ -64,373 +89,637 @@ fn lexer(code: &str) -> Vec<Token> {
     tokens
 }
 
-// --- POLYMORPHIC PRE-PROCESSOR ---
+// =====================================================================
+// --- POLYMORPHIC PRE-PROCESSOR (STEALTH) ---
+// =====================================================================
 
 fn mutate_token_stream(tokens: Vec<Token>) -> Vec<Token> {
-    let mut mutated = Vec::new();
+    let mut mutated_stream = Vec::new();
+    
     for token in tokens {
-        mutated.push(token.clone());
+        mutated_stream.push(token.clone());
+        
         if let Token::Delimiter = token {
             let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as usize;
-            if seed % 10 < 3 {
-                let id = format!("_v_{}", seed % 1000);
-                mutated.push(Token::Keyword("set".to_string()));
-                mutated.push(Token::Identifier(id));
-                mutated.push(Token::Assign);
-                mutated.push(Token::Number((seed % 100) as f64));
-                mutated.push(Token::Operator("+".to_string()));
-                mutated.push(Token::Number(1.0));
-                mutated.push(Token::Delimiter);
+            
+            // 20% chance to inject dead-code variables into the AST to scramble memory hashes
+            if seed % 10 < 2 {
+                let junk_id = format!("_v_{}", seed % 100);
+                mutated_stream.push(Token::Keyword("set".to_string()));
+                mutated_stream.push(Token::Identifier(junk_id));
+                mutated_stream.push(Token::Assign);
+                mutated_stream.push(Token::Number(1.0));
+                mutated_stream.push(Token::Delimiter);
             }
         }
     }
-    mutated
+    mutated_stream
 }
 
-// --- EXECUTION ENGINE ---
+// Format IP addresses safely to support both IPv4 and IPv6 [Dual-Stack]
+fn format_address(ip: &str, port: u16) -> String {
+    if ip.contains(':') { 
+        format!("[{}]:{}", ip, port) // Wrap IPv6 in brackets
+    } else { 
+        format!("{}:{}", ip, port)   // Standard IPv4
+    }
+}
+
+// =====================================================================
+// --- MASTER PARSER & EXECUTION ENGINE ---
+// =====================================================================
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     memory: HashMap<String, Value>,
+    functions: HashMap<String, Vec<Token>>, // The OP Registry
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self { Parser { tokens, pos: 0, memory: HashMap::new() } }
-    fn peek(&self) -> Option<Token> { self.tokens.get(self.pos).cloned() }
-    fn next(&mut self) { self.pos += 1; }
-
+    fn new(tokens: Vec<Token>) -> Self { 
+        Parser { 
+            tokens, 
+            pos: 0, 
+            memory: HashMap::new(), 
+            functions: HashMap::new() 
+        } 
+    }
+    
+    fn peek(&self) -> Option<Token> { 
+        self.tokens.get(self.pos).cloned() 
+    }
+    
+    fn next(&mut self) { 
+        self.pos += 1; 
+    }
+    
     fn expect_keyword(&mut self, kw: &str) {
+        if let Some(Token::Keyword(k)) = self.peek() { 
+            if k == kw { 
+                self.next(); 
+                return; 
+            } 
+        }
+        panic!("[RUNTIME_ERROR] Expected keyword '{}' at position {}.", kw, self.pos);
+    }
+
+    fn parse(&mut self) { 
+        while self.pos < self.tokens.len() { 
+            self.parse_statement(); 
+        } 
+    }
+
+    // Main Router
+    fn parse_statement(&mut self) {
         if let Some(Token::Keyword(k)) = self.peek() {
-            if k == kw { self.next(); return; }
-        }
-        panic!("[RUNTIME_ERROR] Expected keyword '{}' at pos {}.", kw, self.pos);
-    }
-
-    fn parse(&mut self) {
-        while self.pos < self.tokens.len() {
-            self.parse_next_stmt();
-        }
-    }
-
-    fn parse_next_stmt(&mut self) {
-        if let Some(tok) = self.peek() {
-            match tok {
-                Token::Keyword(k) => match k.as_str() {
-                    "set" => self.parse_assignment(),
-                    "log" => self.parse_log(),
-                    "scan" => self.parse_scan(),
-                    "swarm" => self.parse_swarm(),
-                    "payload" => self.parse_payload(),
-                    "while" => self.parse_while(),
-                    "for" => self.parse_for(),
-                    "if" => { self.parse_if(true); },
-                    "wait" => self.parse_wait(),
-                    "write" => self.parse_file_op(false),
-                    "append" => self.parse_file_op(true),
-                    "push" => self.parse_list_push(),
-                    "pop" => self.parse_list_pop(),
-                    "end" => { self.next(); },
-                    _ => self.next(),
-                },
+            match k.as_str() {
+                "set" => self.parse_assignment(),
+                "log" => self.parse_log(),
+                "scan" => self.parse_scan(),
+                "swarm" => self.parse_swarm(),
+                "payload" => self.parse_payload(),
+                "while" => self.parse_while(),
+                "for" => self.parse_for(),
+                "if" => self.parse_if(true),
+                "wait" => self.parse_wait(),
+                "write" => self.parse_file_operation(false),
+                "append" => self.parse_file_operation(true),
+                "push" => self.parse_list_push(),
+                "pop" => self.parse_list_pop(),
+                "op" => self.parse_op_definition(),
+                "call" => self.parse_op_call(),
+                "end" => self.next(),
                 _ => self.next(),
             }
+        } else { 
+            self.next(); 
         }
     }
+
+    // --- LOGIC & ASSIGNMENTS ---
 
     fn parse_assignment(&mut self) {
         self.expect_keyword("set");
-        let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        if let Some(Token::Assign) = self.peek() { self.next(); }
         
-        let val = if let Some(Token::Keyword(k)) = self.peek() {
+        let var_name = if let Some(Token::Identifier(id)) = self.peek() { 
+            self.next(); 
+            id 
+        } else { 
+            panic!("[SYNTAX_ERR] Expected variable name after 'set'."); 
+        };
+        
+        if let Some(Token::Assign) = self.peek() { 
+            self.next(); 
+        }
+        
+        let value = if let Some(Token::Keyword(k)) = self.peek() {
             match k.as_str() {
-                "list" => { self.next(); Value::List(Vec::new()) },
+                "list" => { 
+                    self.next(); 
+                    Value::List(Vec::new()) 
+                },
                 "rand" => self.parse_rand(),
+                "resolve" => self.parse_resolve(),
+                "input" => self.parse_input(),
                 _ => self.parse_condition(),
             }
-        } else { self.parse_condition() };
+        } else { 
+            self.parse_condition() 
+        };
+        
+        if let Some(Token::Delimiter) = self.peek() { 
+            self.next(); 
+        }
+        
+        self.memory.insert(var_name, value);
+    }
 
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        self.memory.insert(name, val);
+    // --- SYSTEM UTILITIES ---
+
+    fn parse_resolve(&mut self) -> Value {
+        self.expect_keyword("resolve");
+        let host = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); };
+        
+        if let Ok(mut addrs) = format!("{}:80", host).to_socket_addrs() {
+            if let Some(resolved_addr) = addrs.next() { 
+                return Value::Str(resolved_addr.ip().to_string()); 
+            }
+        }
+        Value::Str("0.0.0.0".to_string())
+    }
+
+    fn parse_input(&mut self) -> Value {
+        self.expect_keyword("input");
+        let prompt_text = if let Value::Str(s) = self.parse_factor() { s } else { "".to_string() };
+        
+        print!("{}", prompt_text); 
+        let _ = io::stdout().flush();
+        
+        let mut user_input = String::new(); 
+        let _ = io::stdin().read_line(&mut user_input);
+        
+        Value::Str(user_input.trim().to_string())
     }
 
     fn parse_rand(&mut self) -> Value {
         self.expect_keyword("rand");
-        let start = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 0 };
+        let start_range = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 0 };
+        
         self.expect_keyword("to");
-        let end = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 100 };
+        let end_range = if let Value::Num(n) = self.parse_factor() { n as i64 } else { 100 };
+        
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as i64;
-        let result = start + (seed % (end - start + 1).max(1));
-        Value::Num(result as f64)
-    }
-
-    fn parse_list_push(&mut self) {
-        self.expect_keyword("push");
-        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        let val = self.parse_factor();
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        if let Some(Value::List(list)) = self.memory.get_mut(&list_name) {
-            list.push(val);
-        }
-    }
-
-    fn parse_list_pop(&mut self) {
-        self.expect_keyword("pop");
-        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        if let Some(Value::List(list)) = self.memory.get_mut(&list_name) {
-            list.pop();
-        }
-    }
-
-    fn parse_file_op(&mut self, is_append: bool) {
-        self.next(); // Consume keyword
-        let path = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); };
-        let val_to_write = match self.parse_factor() {
-            Value::Num(n) => n.to_string(),
-            Value::Str(s) => s,
-            Value::Bool(b) => b.to_string(),
-            Value::List(l) => format!("{:?}", l),
-        };
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        let mut options = OpenOptions::new();
-        options.write(true).create(true);
-        if is_append { options.append(true); } else { options.truncate(true); }
-        if let Ok(mut f) = options.open(path) { let _ = writeln!(f, "{}", val_to_write); }
-    }
-
-    fn parse_wait(&mut self) {
-        self.expect_keyword("wait");
-        let ms = if let Value::Num(n) = self.parse_factor() { n as u64 } else { 0 };
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        thread::sleep(Duration::from_millis(ms));
+        let random_result = start_range + (seed % (end_range - start_range + 1).max(1));
+        
+        Value::Num(random_result as f64)
     }
 
     fn parse_log(&mut self) {
         self.expect_keyword("log");
-        let val = match self.peek() {
-            Some(Token::StringLiteral(s)) => { self.next(); s },
-            Some(Token::Identifier(id)) => {
-                self.next();
-                match self.memory.get(&id) {
-                    Some(Value::Num(n)) => n.to_string(),
-                    Some(Value::Str(s)) => s.clone(),
-                    Some(Value::Bool(b)) => b.to_string(),
-                    Some(Value::List(l)) => format!("{:?}", l),
-                    None => "null".to_string(),
-                }
-            },
-            Some(Token::Number(n)) => { self.next(); n.to_string() },
-            _ => panic!("Log target invalid"),
+        let log_value = match self.parse_condition() {
+            Value::Num(n) => n.to_string(), 
+            Value::Str(s) => s,
+            Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l),
         };
-        println!("{}", val);
+        println!("{}", log_value);
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
     }
 
+    // --- MATH & EXPRESSION EVALUATOR ---
+
     fn parse_condition(&mut self) -> Value {
-        let left = self.parse_expression();
+        let left_side = self.parse_expression();
+        
         if let Some(Token::Compare(op)) = self.peek() {
             self.next();
-            let right = self.parse_expression();
-            if let (Value::Num(l), Value::Num(r)) = (&left, &right) {
-                let res = match op.as_str() {
-                    "==" => l == r, "!=" => l != r, ">" => l > r, "<" => l < r, ">=" => l >= r, "<=" => l <= r, _ => false
+            let right_side = self.parse_expression();
+            
+            if let (Value::Num(l), Value::Num(r)) = (&left_side, &right_side) {
+                let result = match op.as_str() {
+                    "==" => l == r, 
+                    "!=" => l != r, 
+                    ">" => l > r, 
+                    "<" => l < r, 
+                    ">=" => l >= r, 
+                    "<=" => l <= r, 
+                    _ => false
                 };
-                return Value::Bool(res);
+                return Value::Bool(result);
             }
         }
-        left
+        left_side
     }
 
     fn parse_expression(&mut self) -> Value {
-        let mut res = self.parse_term();
+        let mut result = self.parse_term();
+        
         while let Some(Token::Operator(op)) = self.peek() {
             if op == "+" || op == "-" {
                 self.next();
-                let right = self.parse_term();
-                if let (Value::Num(l), Value::Num(r)) = (&res, &right) {
-                    res = if op == "+" { Value::Num(l + r) } else { Value::Num(l - r) };
-                }
-            } else { break; }
+                let right_side = self.parse_term();
+                
+                result = match (result, right_side) {
+                    (Value::Num(l), Value::Num(r)) => if op == "+" { Value::Num(l + r) } else { Value::Num(l - r) },
+                    (Value::Str(l), Value::Str(r)) => if op == "+" { Value::Str(l + &r) } else { panic!("Cannot subtract strings") },
+                    (Value::Str(l), Value::Num(r)) => if op == "+" { Value::Str(l + &r.to_string()) } else { panic!() },
+                    (Value::Num(l), Value::Str(r)) => if op == "+" { Value::Str(l.to_string() + &r) } else { panic!() },
+                    _ => panic!("Type error in expression"),
+                };
+            } else { 
+                break; 
+            }
         }
-        res
+        result
     }
 
     fn parse_term(&mut self) -> Value {
-        let mut res = self.parse_factor();
+        let mut result = self.parse_factor();
+        
         while let Some(Token::Operator(op)) = self.peek() {
             if op == "*" || op == "/" {
                 self.next();
-                let right = self.parse_factor();
-                if let (Value::Num(l), Value::Num(r)) = (&res, &right) {
-                    res = if op == "*" { Value::Num(l * r) } else { Value::Num(l / r) };
+                let right_side = self.parse_factor();
+                
+                if let (Value::Num(l), Value::Num(r)) = (&result, &right_side) {
+                    result = if op == "*" { Value::Num(l * r) } else { Value::Num(l / r) };
                 }
-            } else { break; }
+            } else { 
+                break; 
+            }
         }
-        res
+        result
     }
 
     fn parse_factor(&mut self) -> Value {
-        let tok = self.peek().expect("EOF");
+        let token = self.peek().expect("Unexpected End of File"); 
         self.next();
-        match tok {
+        
+        match token {
             Token::Number(n) => Value::Num(n),
             Token::StringLiteral(s) | Token::IpAddress(s) => Value::Str(s),
             Token::Identifier(id) => self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)),
-            _ => panic!("Factor error"),
+            _ => panic!("Invalid factor type"),
         }
     }
 
-    fn parse_while(&mut self) {
-        self.expect_keyword("while");
-        let start = self.pos;
-        loop {
-            self.pos = start;
-            if let Value::Bool(b) = self.parse_condition() {
-                if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-                if !b { self.skip_block(); break; }
-                while let Some(tok) = self.peek() {
-                    if let Token::Keyword(ref k) = tok { if k == "end" { break; } }
-                    self.parse_next_stmt();
-                }
-            } else { break; }
-        }
-    }
+    // --- MODULAR OPERATIONS (OP) ---
 
-    fn parse_for(&mut self) {
-        self.expect_keyword("for");
-        let it = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        self.expect_keyword("in");
+    fn parse_op_definition(&mut self) {
+        self.expect_keyword("op");
         
-        let mut items = Vec::new();
-        match self.peek() {
-            Some(Token::StringLiteral(s)) => { // File iteration
-                self.next();
-                let content = fs::read_to_string(s).unwrap_or_default();
-                items = content.lines().map(|l| Value::Str(l.to_string())).collect();
-            },
-            Some(Token::Identifier(id)) => { // List iteration
-                self.next();
-                if let Some(Value::List(l)) = self.memory.get(&id) { items = l.clone(); }
-            },
-            _ => panic!("For loop source invalid"),
-        }
-
+        let op_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        let block_start = self.pos;
-        for val in items {
-            self.memory.insert(it.clone(), val);
-            self.pos = block_start;
-            while let Some(tok) = self.peek() {
-                if let Token::Keyword(ref k) = tok { if k == "end" { break; } }
-                self.parse_next_stmt();
+        
+        let mut op_body = Vec::new(); 
+        let mut block_depth = 1;
+        
+        while let Some(token) = self.peek() {
+            self.next();
+            if let Token::Keyword(ref k) = token {
+                if ["if", "for", "while", "swarm", "scan", "op"].contains(&k.as_str()) { block_depth += 1; }
+                if k == "end" { 
+                    block_depth -= 1; 
+                    if block_depth == 0 { break; } 
+                }
             }
+            op_body.push(token);
         }
-        self.pos = block_start;
-        self.skip_block();
+        self.functions.insert(op_name, op_body);
     }
 
-    fn skip_block(&mut self) {
-        let mut d = 1;
-        while d > 0 {
-            if let Some(Token::Keyword(ref k)) = self.peek() {
-                if ["if", "swarm", "scan", "while", "for"].contains(&k.as_str()) { d += 1; }
-                if k == "end" { d -= 1; }
-            }
-            if d == 0 { break; }
-            self.next();
+    fn parse_op_call(&mut self) {
+        self.expect_keyword("call");
+        let op_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        
+        if let Some(function_body) = self.functions.get(&op_name).cloned() {
+            let mut sub_parser = Parser::new(function_body); 
+            sub_parser.memory = self.memory.clone();
+            sub_parser.functions = self.functions.clone(); 
+            sub_parser.parse(); 
+            self.memory = sub_parser.memory; // Sync memory state after operation
         }
-        self.next();
     }
+
+    // --- OFFENSIVE NETWORKING (SWARM & PAYLOAD) ---
 
     fn parse_scan(&mut self) {
         self.expect_keyword("scan");
-        let t = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        let ip = match self.memory.get(&t) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
+        
+        let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
         let port = match self.memory.get("port") { Some(Value::Num(p)) => *p as u16, _ => 80 };
-        let status = TcpStream::connect_timeout(&format!("{}:{}", ip, port).parse().unwrap(), Duration::from_millis(500)).is_ok();
-        self.parse_if(status);
+        let address = format_address(&ip, port);
+        
+        let is_open = if let Ok(mut resolved_addrs) = address.to_socket_addrs() {
+            if let Some(final_addr) = resolved_addrs.next() {
+                TcpStream::connect_timeout(&final_addr, Duration::from_millis(500)).is_ok()
+            } else { false }
+        } else { false };
+        
+        self.parse_if(is_open);
     }
 
     fn parse_swarm(&mut self) {
         self.expect_keyword("swarm");
-        let t = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        
         self.expect_keyword("ports");
-        let start = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
+        let start_port = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
+        
         self.expect_keyword("to");
-        let end = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
+        let end_port = if let Value::Num(n) = self.parse_factor() { n as u16 } else { 0 };
+        
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        let mut sub = Vec::new();
-        let mut d = 1;
-        while let Some(tok) = self.peek() {
+        
+        // Extract Swarm inner logic block
+        let mut swarm_body = Vec::new(); 
+        let mut block_depth = 1;
+        while let Some(token) = self.peek() {
             self.next();
-            if let Token::Keyword(ref k) = tok {
-                if ["if", "for", "while", "swarm", "scan"].contains(&k.as_str()) { d += 1; }
-                if k == "end" { d -= 1; if d == 0 { break; } }
+            if let Token::Keyword(ref k) = token {
+                if ["if", "for", "while", "swarm", "scan", "op"].contains(&k.as_str()) { block_depth += 1; }
+                if k == "end" { 
+                    block_depth -= 1; 
+                    if block_depth == 0 { break; } 
+                }
             }
-            sub.push(tok);
+            swarm_body.push(token);
         }
-        let ip = match self.memory.get(&t) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
-        let mem = self.memory.clone();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut ts = vec![];
-            for port in start..=end {
-                let (ip_c, sub_c, mut mem_c) = (ip.clone(), sub.clone(), mem.clone());
-                ts.push(tokio::task::spawn_blocking(move || {
-                    let open = TcpStream::connect_timeout(&format!("{}:{}", ip_c, port).parse().unwrap(), Duration::from_millis(400)).is_ok();
-                    mem_c.insert("port".to_string(), Value::Num(port as f64));
-                    let mut p = Parser::new(sub_c); p.memory = mem_c;
-                    p.run_swarm_inner(open);
+        
+        let ip_target = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => panic!() };
+        
+        // Snapshot context for threads
+        let memory_snapshot = self.memory.clone();
+        let functions_snapshot = self.functions.clone();
+        
+        // Spin up the async multithreading runtime
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut thread_handles = vec![];
+            
+            for port in start_port..=end_port {
+                let current_ip = ip_target.clone();
+                let inner_code = swarm_body.clone();
+                let mut local_memory = memory_snapshot.clone();
+                let local_functions = functions_snapshot.clone();
+                
+                thread_handles.push(tokio::task::spawn_blocking(move || {
+                    let formatted_address = format_address(&current_ip, port);
+                    
+                    // Safe Async Connection Test
+                    let is_port_open = if let Ok(mut resolved) = formatted_address.to_socket_addrs() {
+                        if let Some(addr) = resolved.next() {
+                            TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+                        } else { false }
+                    } else { false };
+                    
+                    // Inject dynamic variable
+                    local_memory.insert("port".to_string(), Value::Num(port as f64));
+                    
+                    // Run the isolated parser for this port
+                    let mut isolated_parser = Parser::new(inner_code); 
+                    isolated_parser.memory = local_memory; 
+                    isolated_parser.functions = local_functions;
+                    isolated_parser.execute_swarm_block(is_port_open);
                 }));
             }
-            for t in ts { let _ = t.await; }
+            
+            for handle in thread_handles { 
+                let _ = handle.await; 
+            }
         });
     }
 
-    fn run_swarm_inner(&mut self, open: bool) {
+    fn execute_swarm_block(&mut self, is_open: bool) {
         while self.pos < self.tokens.len() {
             if let Some(Token::Keyword(ref k)) = self.peek() {
-                if k == "if" { self.parse_if(open); } else { self.parse_next_stmt(); }
-            } else { self.next(); }
-        }
-    }
-
-    fn parse_if(&mut self, cond: bool) {
-        self.expect_keyword("if");
-        self.next();
-        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        if cond {
-            while let Some(tok) = self.peek() {
-                if let Token::Keyword(ref k) = tok { if k == "end" { break; } }
-                self.parse_next_stmt();
+                if k == "if" { 
+                    self.parse_if(is_open); 
+                } else { 
+                    self.parse_statement(); 
+                }
+            } else { 
+                self.next(); 
             }
-            if let Some(Token::Keyword(ref k)) = self.peek() { if k == "end" { self.next(); } }
-        } else { self.skip_block(); }
+        }
     }
 
     fn parse_payload(&mut self) {
         self.expect_keyword("payload");
-        let t_id = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        let p_id = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { if let Some(Token::Number(n)) = self.peek() { self.next(); n.to_string() } else { panic!(); } };
-        let data = if let Some(Token::StringLiteral(s)) = self.peek() { self.next(); s } else { panic!(); };
-        let ip = match self.memory.get(&t_id) { Some(Value::Str(s)) => s.clone(), _ => t_id };
-        let port = match self.memory.get(&p_id) { Some(Value::Num(n)) => *n as u16, _ => p_id.parse().unwrap_or(80) };
-        if let Ok(mut s) = TcpStream::connect_timeout(&format!("{}:{}", ip, port).parse().unwrap(), Duration::from_secs(1)) {
-            let _ = s.write_all(data.replace("\\n", "\n").replace("\\r", "\r").as_bytes());
-            let mut b = [0; 4096];
-            if let Ok(n) = s.read(&mut b) { if n > 0 { println!("{}", String::from_utf8_lossy(&b[..n]).trim()); } }
+        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        
+        let port_var = if let Some(Token::Identifier(id)) = self.peek() { 
+            self.next(); id 
+        } else { 
+            if let Some(Token::Number(n)) = self.peek() { self.next(); n.to_string() } else { panic!(); } 
+        };
+        
+        let raw_payload = if let Some(Token::StringLiteral(s)) = self.peek() { self.next(); s } else { panic!(); };
+        
+        let ip = match self.memory.get(&target_var) { Some(Value::Str(s)) => s.clone(), _ => target_var };
+        let port = match self.memory.get(&port_var) { Some(Value::Num(n)) => *n as u16, _ => port_var.parse().unwrap_or(80) };
+        let address = format_address(&ip, port);
+        
+        if let Ok(mut resolved_addrs) = address.to_socket_addrs() {
+            if let Some(final_addr) = resolved_addrs.next() {
+                if let Ok(mut stream) = TcpStream::connect_timeout(&final_addr, Duration::from_secs(1)) {
+                    let formatted_data = raw_payload.replace("\\n", "\n").replace("\\r", "\r");
+                    let _ = stream.write_all(formatted_data.as_bytes());
+                    
+                    let mut buffer = [0; 4096];
+                    if let Ok(bytes_read) = stream.read(&mut buffer) { 
+                        if bytes_read > 0 { 
+                            println!("{}", String::from_utf8_lossy(&buffer[..bytes_read]).trim()); 
+                        } 
+                    }
+                }
+            }
         }
+    }
+
+    // --- CONTROL FLOW (LOOPS & IFs) ---
+
+    fn parse_if(&mut self, condition_met: bool) {
+        self.expect_keyword("if"); 
+        self.next(); // Consume 'open' or variable
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+        
+        if condition_met {
+            // Execute the block
+            while let Some(token) = self.peek() {
+                if let Token::Keyword(ref k) = token { if k == "end" { break; } }
+                self.parse_statement();
+            }
+            if let Some(Token::Keyword(ref k)) = self.peek() { if k == "end" { self.next(); } }
+        } else { 
+            // Skip the block
+            self.skip_logic_block(); 
+        }
+    }
+
+    fn skip_logic_block(&mut self) {
+        let mut block_depth = 1;
+        while block_depth > 0 {
+            if let Some(Token::Keyword(ref k)) = self.peek() {
+                if ["if", "swarm", "scan", "while", "for", "op"].contains(&k.as_str()) { block_depth += 1; }
+                if k == "end" { block_depth -= 1; }
+            }
+            if block_depth == 0 { break; } 
+            self.next();
+        }
+        self.next(); // Consume final 'end'
+    }
+
+    fn parse_while(&mut self) {
+        self.expect_keyword("while"); 
+        let condition_start_pos = self.pos;
+        
+        loop {
+            self.pos = condition_start_pos;
+            if let Value::Bool(condition_is_true) = self.parse_condition() {
+                if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+                
+                if !condition_is_true { 
+                    self.skip_logic_block(); 
+                    break; 
+                }
+                
+                while let Some(token) = self.peek() { 
+                    if let Token::Keyword(ref k) = token { if k == "end" { break; } } 
+                    self.parse_statement(); 
+                }
+            } else { 
+                break; 
+            }
+        }
+    }
+
+    fn parse_for(&mut self) {
+        self.expect_keyword("for"); 
+        let iter_variable = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        self.expect_keyword("in"); 
+        
+        let mut iteration_items = Vec::new();
+        match self.peek() {
+            Some(Token::StringLiteral(filename)) => { 
+                self.next(); 
+                // Read from a text file on disk
+                let content = fs::read_to_string(filename).unwrap_or_default();
+                iteration_items = content.lines().map(|line| Value::Str(line.to_string())).collect(); 
+            },
+            Some(Token::Identifier(list_name)) => { 
+                self.next(); 
+                // Read from an internal memory list
+                if let Some(Value::List(l)) = self.memory.get(&list_name) { iteration_items = l.clone(); } 
+            },
+            _ => panic!("Invalid iteration source for loop"),
+        }
+        
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+        let loop_body_start_pos = self.pos;
+        
+        for item_value in iteration_items {
+            self.memory.insert(iter_variable.clone(), item_value); 
+            self.pos = loop_body_start_pos;
+            
+            while let Some(token) = self.peek() { 
+                if let Token::Keyword(ref k) = token { if k == "end" { break; } } 
+                self.parse_statement(); 
+            }
+        }
+        
+        self.pos = loop_body_start_pos; 
+        self.skip_logic_block();
+    }
+
+    // --- DATA STRUCTURES & FILES ---
+
+    fn parse_wait(&mut self) { 
+        self.expect_keyword("wait"); 
+        let ms_delay = if let Value::Num(n) = self.parse_factor() { n as u64 } else { 0 }; 
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
+        thread::sleep(Duration::from_millis(ms_delay)); 
+    }
+
+    fn parse_file_operation(&mut self, is_append: bool) { 
+        self.next(); // Consume keyword
+        let filepath = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); }; 
+        
+        let content_to_write = match self.parse_factor() { 
+            Value::Num(n) => n.to_string(), 
+            Value::Str(s) => s, 
+            Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), 
+        }; 
+        
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
+        
+        let mut file_options = OpenOptions::new(); 
+        file_options.write(true).create(true); 
+        
+        if is_append { 
+            file_options.append(true); 
+        } else { 
+            file_options.truncate(true); 
+        } 
+        
+        if let Ok(mut file) = file_options.open(filepath) { 
+            let _ = writeln!(file, "{}", content_to_write); 
+        } 
+    }
+
+    fn parse_list_push(&mut self) { 
+        self.expect_keyword("push"); 
+        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; 
+        let value_to_add = self.parse_factor(); 
+        
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
+        
+        if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { 
+            internal_list.push(value_to_add); 
+        } 
+    }
+
+    fn parse_list_pop(&mut self) { 
+        self.expect_keyword("pop"); 
+        let list_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); }; 
+        
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
+        
+        if let Some(Value::List(internal_list)) = self.memory.get_mut(&list_name) { 
+            internal_list.pop(); 
+        } 
     }
 }
 
+// =====================================================================
+// --- SYSTEM ENTRY POINT ---
+// =====================================================================
+
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { return; }
-    let code = fs::read_to_string(&args[1]).unwrap_or_default();
-    let mutated = mutate_token_stream(lexer(&code));
-    let mut parser = Parser::new(mutated);
-    parser.parse();
+    if args.len() < 2 { 
+        println!("[!] Error: No breach payload provided.");
+        return; 
+    }
+    
+    // Load the .breach file from the disk
+    let raw_code = fs::read_to_string(&args[1]).unwrap_or_else(|_| {
+        println!("[!] Error: Failed to read file {}", args[1]);
+        std::process::exit(1);
+    });
+    
+    // 1. Lexical Analysis (Text to Tokens)
+    let raw_tokens = lexer(&raw_code);
+    
+    // 2. Polymorphic Obfuscation (Injecting dead-code memory variants)
+    let mutated_tokens = mutate_token_stream(raw_tokens);
+    
+    // 3. Execution (Running the Master Parser)
+    let mut execution_engine = Parser::new(mutated_tokens);
+    execution_engine.parse();
 }
