@@ -1,6 +1,3 @@
-set url = "https://discord.com/api/webhooks/";
-
-// Manually forge the Discord JSON packet
-set data = "{ \"content\": \"[!] Webhook test 2 successful\" }";
-
-transmit url data;
+set intel = "GHOST_PROTOCOL_ACTIVE";
+log "Dropping intel to disk...";
+write "evidence.log" intel;
