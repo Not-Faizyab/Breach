@@ -15,7 +15,7 @@ use std::ptr;
 use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
 
 // =====================================================================
-// --- CORE DATA ARCHITECTURE ---
+// --- CORE DATA ARCHITECTURE (UPGRADED) ---
 // =====================================================================
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +34,12 @@ enum Token {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Value { 
-    Num(f64), Str(String), Bool(bool), List(Vec<Value>) 
+    Num(f64), 
+    Str(String), 
+    Bool(bool), 
+    List(Vec<Value>),
+    Dict(HashMap<String, Value>), // PILLAR 2: Native HashMaps
+    None // Null pointer state
 }
 
 // =====================================================================
@@ -66,9 +71,12 @@ unsafe fn hunt_ssn(function_address: *const u8) -> Option<u32> {
 fn lexer(code: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let token_rules = vec![
+        // THE FIX: SKIP is now the absolute highest priority. 
+        // Comments are deleted before the math engine even wakes up.
+        ("SKIP", r"[ \t\n\r]+|//.*"),
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import)\b"),
+        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
@@ -76,7 +84,6 @@ fn lexer(code: &str) -> Vec<Token> {
         ("STRING", r#""(?:\\.|[^"\\])*""#),
         ("DELIM", r";"),
         ("PUNCT", r"[{}:,]"),
-        ("SKIP", r"[ \t\n\r]+"),
     ];
 
     let combined_regex = token_rules.iter().map(|(n, p)| format!("(?P<{}>{})", n, p)).collect::<Vec<_>>().join("|");
@@ -85,10 +92,14 @@ fn lexer(code: &str) -> Vec<Token> {
 
     for caps in re.captures_iter(code) {
         let m = caps.get(0).unwrap();
-        if m.start() > last_end { panic!("[FATAL] Lexer failure at offset {}.", last_end); }
+        if m.start() > last_end { 
+            let broken_snippet = &code[last_end..m.start()];
+            panic!("[FATAL] Lexer failure at offset {}. Unrecognized syntax: '{}'", last_end, broken_snippet); 
+        }
         last_end = m.end();
         let val = m.as_str().to_string();
         
+        // ... (keep the rest of the if/else block the exact same)
         if caps.name("SKIP").is_some() { continue; }
         else if caps.name("KEYWORD").is_some() { tokens.push(Token::Keyword(val)); }
         else if caps.name("TYPE_IP").is_some() { tokens.push(Token::IpAddress(val)); }
@@ -139,11 +150,19 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     memory: HashMap<String, Value>,
-    functions: HashMap<String, Vec<Token>>, 
+    functions: HashMap<String, (Vec<String>, Vec<Token>)>, // PILLAR 1: Arg Storage
+    has_error: bool, // PILLAR 3: Fault Tolerance State
+    return_value: Value,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self { Parser { tokens, pos: 0, memory: HashMap::new(), functions: HashMap::new() } }
+    fn new(tokens: Vec<Token>) -> Self { 
+        Parser { 
+            tokens, pos: 0, memory: HashMap::new(), 
+            functions: HashMap::new(), has_error: false, return_value: Value::None 
+        } 
+    }
+    
     fn peek(&self) -> Option<Token> { self.tokens.get(self.pos).cloned() }
     fn next(&mut self) { self.pos += 1; }
     
@@ -162,10 +181,156 @@ impl Parser {
                 "import" => self.parse_import(), "while" => self.parse_while(), "for" => self.parse_for(),
                 "if" => self.parse_if(true), "wait" => self.parse_wait(), "write" => self.parse_file_op(false),
                 "append" => self.parse_file_op(true), "push" => self.parse_push(), "pop" => self.parse_pop(),
-                "op" => self.parse_op_def(), "call" => self.parse_op_call(), "end" => self.next(), _ => self.next(),
+                "fn" | "op" => self.parse_fn(), "return" => self.parse_return(), "call" => { self.parse_call(); if let Some(Token::Delimiter) = self.peek() { self.next(); } },
+                "put" => self.parse_put(), "try" => self.parse_try(), "panic" => self.parse_panic(),
+                "end" => self.next(), _ => self.next(),
             }
         } else { self.next(); }
     }
+
+    // =====================================================================
+    // --- TURING PILLAR 1: STACK FRAMES & SCOPING ---
+    // =====================================================================
+
+    fn parse_fn(&mut self) {
+        self.next(); // Consume 'fn' or 'op'
+        let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        
+        let mut args = Vec::new();
+        while let Some(Token::Identifier(id)) = self.peek() { self.next(); args.push(id); }
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+        
+        let mut body = Vec::new(); let mut depth = 1;
+        while let Some(t) = self.peek() {
+            self.next();
+            if let Token::Keyword(ref k) = t {
+                if ["if", "for", "while", "swarm", "scan", "fn", "op", "try"].contains(&k.as_str()) { depth += 1; }
+                if k == "end" { depth -= 1; if depth == 0 { break; } }
+            }
+            body.push(t);
+        }
+        self.functions.insert(name, (args, body));
+    }
+
+    fn parse_return(&mut self) {
+        self.expect_keyword("return");
+        self.return_value = self.parse_cond(); 
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+    }
+
+    fn parse_call(&mut self) -> Value {
+        self.expect_keyword("call");
+        let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        
+        let mut passed_args = Vec::new();
+        while self.peek() != Some(Token::Delimiter) && self.peek().is_some() {
+            passed_args.push(self.parse_factor());
+        }
+
+        if let Some((arg_names, body)) = self.functions.get(&name).cloned() {
+            let mut sub = Parser::new(body);
+            sub.functions = self.functions.clone();
+            for (i, val) in passed_args.into_iter().enumerate() {
+                if i < arg_names.len() { sub.memory.insert(arg_names[i].clone(), val); }
+            }
+            sub.parse();
+            return sub.return_value;
+        }
+        Value::None
+    }
+
+    // =====================================================================
+    // --- TURING PILLAR 2: NATIVE DICTIONARIES ---
+    // =====================================================================
+
+    fn parse_put(&mut self) {
+        self.expect_keyword("put");
+        let dict_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        let key = if let Value::Str(s) = self.parse_factor() { s } else { panic!("Dict keys must be strings"); };
+        let val = self.parse_cond(); 
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        
+        if let Some(Value::Dict(internal_dict)) = self.memory.get_mut(&dict_name) {
+            internal_dict.insert(key, val);
+        }
+    }
+
+    fn parse_get(&mut self) -> Value {
+        self.expect_keyword("get");
+        let dict_name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        let key = if let Value::Str(s) = self.parse_factor() { s } else { panic!("Dict keys must be strings"); };
+        
+        if let Some(Value::Dict(internal_dict)) = self.memory.get(&dict_name) {
+            return internal_dict.get(&key).cloned().unwrap_or(Value::None);
+        }
+        Value::None
+    }
+
+    // =====================================================================
+    // --- TURING PILLAR 3: FAULT TOLERANCE (TRY/RESCUE) ---
+    // =====================================================================
+
+    fn parse_try(&mut self) {
+        self.expect_keyword("try");
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+        
+        self.has_error = false;
+        
+        // 1. Execute the Try Block
+        while self.pos < self.tokens.len() {
+            if let Some(Token::Keyword(ref k)) = self.peek() { 
+                if k == "rescue" || k == "end" { break; } 
+            }
+            self.parse_stmt();
+            if self.has_error { break; } // Stop executing immediately on panic
+        }
+        
+        // 2. THE FIX: If we panicked, strictly skip EVERYTHING until 'rescue' or 'end'
+        if self.has_error {
+            let mut depth = 1;
+            while self.pos < self.tokens.len() {
+                if let Some(Token::Keyword(ref k)) = self.peek() {
+                    if ["try", "if", "while", "for", "swarm", "fn", "op"].contains(&k.as_str()) { depth += 1; }
+                    if k == "end" { depth -= 1; if depth == 0 { break; } }
+                    if k == "rescue" && depth == 1 { break; }
+                }
+                self.next(); // Force cursor forward past strings, semicolons, etc.
+            }
+        }
+
+        // 3. Handle the Rescue Block
+        if let Some(Token::Keyword(ref k)) = self.peek() {
+            if k == "rescue" {
+                self.next();
+                if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+                
+                if !self.has_error {
+                    // Try succeeded! Skip the rescue block cleanly.
+                    self.skip_block();
+                } else {
+                    // Try failed! Execute the rescue block.
+                    self.has_error = false;
+                    while self.pos < self.tokens.len() {
+                        if let Some(Token::Keyword(ref k)) = self.peek() { if k == "end" { break; } }
+                        self.parse_stmt();
+                    }
+                }
+            }
+        }
+        
+        // Consume the final 'end'
+        if let Some(Token::Keyword(ref k)) = self.peek() { if k == "end" { self.next(); } }
+    }
+
+    fn parse_panic(&mut self) {
+        self.expect_keyword("panic");
+        self.has_error = true;
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
+    }
+
+    // =====================================================================
+    // --- CORE LOGIC & EVALUATION ---
+    // =====================================================================
 
     fn parse_import(&mut self) {
         self.expect_keyword("import");
@@ -188,8 +353,12 @@ impl Parser {
         if let Some(Token::Assign) = self.peek() { self.next(); }
         let val = if let Some(Token::Keyword(k)) = self.peek() {
             match k.as_str() {
-                "list" => { self.next(); Value::List(Vec::new()) }, "rand" => self.parse_rand(),
-                "resolve" => self.parse_resolve(), "input" => self.parse_input(), _ => self.parse_cond(),
+                "list" => { self.next(); Value::List(Vec::new()) },
+                "dict" => { self.next(); Value::Dict(HashMap::new()) },
+                "rand" => self.parse_rand(),
+                "resolve" => self.parse_resolve(),
+                "input" => self.parse_input(),
+                _ => self.parse_cond(),
             }
         } else { self.parse_cond() };
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
@@ -223,7 +392,8 @@ impl Parser {
     fn parse_log(&mut self) {
         self.expect_keyword("log");
         let val = match self.parse_cond() {
-            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l),
+            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), Value::None => "None".to_string(),
         };
         println!("{}", val);
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
@@ -269,38 +439,20 @@ impl Parser {
         res
     }
 
+    // THE PRODIGY MOVE: Resolving functions and dicts gracefully mid-calculation
     fn parse_factor(&mut self) -> Value {
-        let tok = self.peek().unwrap(); self.next();
+        let tok = self.peek().expect("Unexpected EOF"); 
         match tok {
-            Token::Number(n) => Value::Num(n), Token::StringLiteral(s) | Token::IpAddress(s) => Value::Str(s),
-            Token::Identifier(id) => self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)),
-            _ => panic!("Factor error"),
+            Token::Number(n) => { self.next(); Value::Num(n) },
+            Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
+            Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
+            Token::Keyword(k) if k == "call" => self.parse_call(),
+            Token::Keyword(k) if k == "get" => self.parse_get(),
+            _ => { self.next(); panic!("Invalid factor type: {:?}", tok); }
         }
     }
 
-    fn parse_op_def(&mut self) {
-        self.expect_keyword("op"); let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-        let mut body = Vec::new(); let mut depth = 1;
-        while let Some(t) = self.peek() {
-            self.next();
-            if let Token::Keyword(ref k) = t {
-                if ["if", "for", "while", "swarm", "scan", "op"].contains(&k.as_str()) { depth += 1; }
-                if k == "end" { depth -= 1; if depth == 0 { break; } }
-            }
-            body.push(t);
-        }
-        self.functions.insert(name, body);
-    }
-
-    fn parse_op_call(&mut self) {
-        self.expect_keyword("call"); let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        if let Some(body) = self.functions.get(&name).cloned() {
-            let mut sub = Parser::new(body); sub.memory = self.memory.clone(); sub.functions = self.functions.clone(); 
-            sub.parse(); self.memory = sub.memory; 
-        }
-    }
+    // --- OFFENSIVE NETWORKING ---
 
     fn parse_scan(&mut self) {
         self.expect_keyword("scan"); let t = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
@@ -324,7 +476,7 @@ impl Parser {
         while let Some(tok) = self.peek() {
             self.next();
             if let Token::Keyword(ref k) = tok {
-                if ["if", "for", "while", "swarm", "scan", "op"].contains(&k.as_str()) { d += 1; }
+                if ["if", "for", "while", "swarm", "scan", "fn", "op", "try"].contains(&k.as_str()) { d += 1; }
                 if k == "end" { d -= 1; if d == 0 { break; } }
             }
             body.push(tok);
@@ -377,7 +529,10 @@ impl Parser {
     fn parse_transmit(&mut self) {
         self.expect_keyword("transmit");
         let url_val = self.parse_factor();
-        let payload = match self.parse_factor() { Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l) };
+        let payload = match self.parse_factor() { 
+            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), Value::None => "None".to_string() 
+        };
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
         let url = if let Value::Str(s) = url_val { s } else { panic!(); };
         
@@ -397,7 +552,10 @@ impl Parser {
     fn parse_file_op(&mut self, is_append: bool) { 
         self.next(); 
         let filepath = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); }; 
-        let content = match self.parse_factor() { Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), Value::List(l) => format!("{:?}", l) }; 
+        let content = match self.parse_factor() { 
+            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), Value::None => "None".to_string()
+        }; 
         if let Some(Token::Delimiter) = self.peek() { self.next(); } 
 
         #[cfg(target_os = "windows")]
@@ -424,6 +582,8 @@ impl Parser {
         } 
     }
 
+    // --- CONTROL FLOW ---
+
     fn parse_if(&mut self, cond: bool) {
         self.expect_keyword("if"); self.next(); 
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
@@ -437,7 +597,7 @@ impl Parser {
         let mut d = 1;
         while d > 0 {
             if let Some(Token::Keyword(ref k)) = self.peek() {
-                if ["if", "swarm", "scan", "while", "for", "op"].contains(&k.as_str()) { d += 1; }
+                if ["if", "swarm", "scan", "while", "for", "op", "fn", "try"].contains(&k.as_str()) { d += 1; }
                 if k == "end" { d -= 1; }
             }
             if d == 0 { break; } self.next();
