@@ -1,56 +1,36 @@
-log "--- SOVEREIGN ENGINE V4: TURING TEST SUITE ---";
+log "--- SOVEREIGN OS: TERMINAL CALCULATOR ---";
+log "Type '0' as the first number to exit.";
 
-// ==========================================
-// TEST 1: NATIVE DICTIONARIES
-// ==========================================
-log "[*] Booting Phase 1: Native Dictionaries...";
+while 1 == 1:
+    log " ";
+    set a_raw = input "Enter first number: ";
+    set a = num a_raw; 
 
-set config = dict;
-put config "target_ip" "192.168.1.100";
-put config "target_port" "443";
-put config "stealth_mode" true;
+    if a == 0:
+        log "[*] Shutting down calculator...";
+        break; 
+    end
 
-log "[+] Configuration map loaded into memory.";
+    // THE FIX: Renamed the variable from 'op' to 'operator'
+    set operator = input "Enter operator (+, -, *, /, %): ";
+    set b_raw = input "Enter second number: ";
+    set b = num b_raw;
 
-// ==========================================
-// TEST 2: TRUE FUNCTIONS & SCOPES
-// ==========================================
-log "[*] Booting Phase 2: Call Stacks & Functions...";
+    set result = 0;
 
-fn craft_payload ip port:
-    // This 'full_url' variable only exists inside this function
-    set full_url = "https://" + ip + ":" + port;
-    return full_url;
+    if operator == "+": set result = a + b; end
+    if operator == "-": set result = a - b; end
+    if operator == "*": set result = a * b; end
+    if operator == "%": set result = a % b; end
+    
+    if operator == "/": 
+        try:
+            set result = a / b;
+        rescue:
+            log "[!] Error: Math violation (Division by zero)";
+        end
+    end
+
+    log "Result: ";
+    log result;
 end
-
-// We dynamically pull from the dictionary and feed the function
-set exfil_url = call craft_payload get config "target_ip" get config "target_port";
-
-log "[+] Payload crafted successfully. Target URL:";
-log exfil_url;
-
-// ==========================================
-// TEST 3: FAULT TOLERANCE (EDR BYPASS)
-// ==========================================
-log "[*] Booting Phase 3: Fault Tolerance & Panic...";
-
-try:
-    log "[!] Attempting high-risk memory injection...";
-    wait 1000; // Dramatic pause
-    
-    // We simulate CrowdStrike/SentinelOne catching our attack and crashing the thread
-    panic; 
-    
-    log "[-] FATAL: You will never see this line. The EDR caught us.";
-rescue:
-    log "[+] EDR hook intercepted the thread! RESCUE block activated.";
-    log "[+] Thread survived. Falling back to Hell's Gate disk drop...";
-    
-    // We execute the Void Layer write operation we built earlier
-    set backup_data = "[SYSTEM BREACH] Target data acquired via fallback.";
-    write "turing_evidence.log" backup_data;
-    
-    log "[+] Target data secured to disk.";
-end
-
-log "--- ALL SYSTEMS NOMINAL. THE ENGINE IS TURING COMPLETE. ---";

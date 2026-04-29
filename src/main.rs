@@ -76,11 +76,11 @@ fn lexer(code: &str) -> Vec<Token> {
         ("SKIP", r"[ \t\n\r]+|//.*"),
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic)\b"),
+        ("KEYWORD", r"\b(set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
-        ("OP", r"[+\-*/]"),
+        ("OP", r"[+\-*/%]"),
         ("STRING", r#""(?:\\.|[^"\\])*""#),
         ("DELIM", r";"),
         ("PUNCT", r"[{}:,]"),
@@ -150,16 +150,18 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     memory: HashMap<String, Value>,
-    functions: HashMap<String, (Vec<String>, Vec<Token>)>, // PILLAR 1: Arg Storage
-    has_error: bool, // PILLAR 3: Fault Tolerance State
+    functions: HashMap<String, (Vec<String>, Vec<Token>)>, 
+    has_error: bool, 
     return_value: Value,
+    has_break: bool, // NEW: Tracks loop breaking
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self { 
         Parser { 
             tokens, pos: 0, memory: HashMap::new(), 
-            functions: HashMap::new(), has_error: false, return_value: Value::None 
+            functions: HashMap::new(), has_error: false, 
+            return_value: Value::None, has_break: false // NEW
         } 
     }
     
@@ -179,10 +181,16 @@ impl Parser {
                 "set" => self.parse_assignment(), "log" => self.parse_log(), "scan" => self.parse_scan(),
                 "swarm" => self.parse_swarm(), "payload" => self.parse_payload(), "transmit" => self.parse_transmit(), 
                 "import" => self.parse_import(), "while" => self.parse_while(), "for" => self.parse_for(),
-                "if" => self.parse_if(true), "wait" => self.parse_wait(), "write" => self.parse_file_op(false),
+                "if" => self.parse_standard_if(), "wait" => self.parse_wait(), "write" => self.parse_file_op(false),
                 "append" => self.parse_file_op(true), "push" => self.parse_push(), "pop" => self.parse_pop(),
                 "fn" | "op" => self.parse_fn(), "return" => self.parse_return(), "call" => { self.parse_call(); if let Some(Token::Delimiter) = self.peek() { self.next(); } },
-                "put" => self.parse_put(), "try" => self.parse_try(), "panic" => self.parse_panic(),
+                "put" => self.parse_put(), "try" => self.parse_try(), // Inside parse_stmt match block:
+                "panic" => self.parse_panic(),
+                "break" => { 
+        self.has_break = true; 
+        self.next(); 
+        if let Some(Token::Delimiter) = self.peek() { self.next(); } 
+    },
                 "end" => self.next(), _ => self.next(),
             }
         } else { self.next(); }
@@ -349,7 +357,13 @@ impl Parser {
 
     fn parse_assignment(&mut self) {
         self.expect_keyword("set");
-        let name = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
+        let name = if let Some(Token::Identifier(id)) = self.peek() { 
+            self.next(); id 
+        } else { 
+            // THE FIX: Professional compiler error logging
+            panic!("\n[!] SYNTAX ERROR: Expected a variable name, but found a reserved keyword or invalid symbol: {:?}\n", self.peek()); 
+        };
+        
         if let Some(Token::Assign) = self.peek() { self.next(); }
         let val = if let Some(Token::Keyword(k)) = self.peek() {
             match k.as_str() {
@@ -403,12 +417,105 @@ impl Parser {
         let left = self.parse_expr();
         if let Some(Token::Compare(op)) = self.peek() {
             self.next(); let right = self.parse_expr();
+            
+            // 1. Number Comparison
             if let (Value::Num(l), Value::Num(r)) = (&left, &right) {
                 let res = match op.as_str() { "==" => l == r, "!=" => l != r, ">" => l > r, "<" => l < r, ">=" => l >= r, "<=" => l <= r, _ => false };
                 return Value::Bool(res);
             }
+            // 2. String Comparison (Required for checking operator inputs!)
+            if let (Value::Str(l), Value::Str(r)) = (&left, &right) {
+                let res = match op.as_str() { "==" => l == r, "!=" => l != r, _ => false };
+                return Value::Bool(res);
+            }
         }
         left
+    }
+
+    // =====================================================================
+    // --- INDESTRUCTIBLE CONTROL FLOW ---
+    // =====================================================================
+
+    fn parse_standard_if(&mut self) {
+        self.expect_keyword("if");
+        let cond_val = self.parse_cond(); 
+        let cond = match cond_val { Value::Bool(b) => b, Value::Num(n) => n != 0.0, _ => false };
+        if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+        
+        // 1. MAP THE BOUNDARY: Find the exact 'end' of this specific IF statement
+        let mut temp_pos = self.pos;
+        let mut depth = 1;
+        while temp_pos < self.tokens.len() {
+            if let Token::Keyword(ref k) = self.tokens[temp_pos] {
+                if ["if", "swarm", "scan", "while", "for", "op", "fn", "try"].contains(&k.as_str()) { depth += 1; }
+                if k == "end" { depth -= 1; if depth == 0 { break; } }
+            }
+            temp_pos += 1;
+        }
+        let end_of_if = temp_pos;
+
+        // 2. EXECUTE
+        if cond {
+            while self.pos < end_of_if {
+                self.parse_stmt();
+                if self.has_break { break; } // Stop executing, but DO NOT consume the break state!
+            }
+        }
+        
+        // 3. TELEPORT: Instantly jump past the 'end' keyword safely
+        self.pos = end_of_if + 1;
+    }
+
+    fn parse_while(&mut self) {
+        self.expect_keyword("while");
+        let cond_start = self.pos;
+        
+        // 1. MAP THE BOUNDARY: Find the exact 'end' of this specific WHILE loop
+        let mut temp_pos = self.pos;
+        while temp_pos < self.tokens.len() && self.tokens[temp_pos] != Token::Punctuation(":".to_string()) {
+            temp_pos += 1;
+        }
+        temp_pos += 1; 
+        
+        let mut depth = 1;
+        while temp_pos < self.tokens.len() {
+            if let Token::Keyword(ref k) = self.tokens[temp_pos] {
+                if ["if", "swarm", "scan", "while", "for", "op", "fn", "try"].contains(&k.as_str()) { depth += 1; }
+                if k == "end" { depth -= 1; if depth == 0 { break; } }
+            }
+            temp_pos += 1;
+        }
+        let end_of_while = temp_pos;
+
+        // 2. EXECUTE
+        loop {
+            self.pos = cond_start;
+            self.has_break = false; // Reset the flag on a new iteration
+            
+            if let Value::Bool(b) = self.parse_cond() {
+                if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
+                
+                if !b { 
+                    self.pos = end_of_while + 1; // Condition failed, jump out!
+                    break; 
+                }
+                
+                while self.pos < end_of_while {
+                    self.parse_stmt();
+                    if self.has_break { break; }
+                }
+                
+                // 3. THE CATCH: If a break happened inside the loop, shatter the loop!
+                if self.has_break {
+                    self.has_break = false;      // We caught the break signal
+                    self.pos = end_of_while + 1; // TELEPORT TO THE EXIT DOOR
+                    break;                       // Kill the infinite loop
+                }
+            } else { 
+                self.pos = end_of_while + 1;
+                break; 
+            }
+        }
     }
 
     fn parse_expr(&mut self) -> Value {
@@ -431,15 +538,18 @@ impl Parser {
     fn parse_term(&mut self) -> Value {
         let mut res = self.parse_factor();
         while let Some(Token::Operator(op)) = self.peek() {
-            if op == "*" || op == "/" {
+            if op == "*" || op == "/" || op == "%" {
                 self.next(); let right = self.parse_factor();
-                if let (Value::Num(l), Value::Num(r)) = (&res, &right) { res = if op == "*" { Value::Num(l * r) } else { Value::Num(l / r) }; }
+                if let (Value::Num(l), Value::Num(r)) = (&res, &right) { 
+                    res = if op == "*" { Value::Num(l * r) } 
+                    else if op == "/" { Value::Num(l / r) }
+                    else { Value::Num(l % r) }; // Modulo added!
+                }
             } else { break; }
         }
         res
     }
 
-    // THE PRODIGY MOVE: Resolving functions and dicts gracefully mid-calculation
     fn parse_factor(&mut self) -> Value {
         let tok = self.peek().expect("Unexpected EOF"); 
         match tok {
@@ -448,6 +558,14 @@ impl Parser {
             Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
             Token::Keyword(k) if k == "call" => self.parse_call(),
             Token::Keyword(k) if k == "get" => self.parse_get(),
+            Token::Keyword(k) if k == "num" => { // NEW: Type Casting
+                self.next();
+                match self.parse_factor() {
+                    Value::Str(s) => Value::Num(s.parse().unwrap_or(0.0)),
+                    Value::Num(n) => Value::Num(n),
+                    _ => Value::Num(0.0),
+                }
+            },
             _ => { self.next(); panic!("Invalid factor type: {:?}", tok); }
         }
     }
@@ -603,18 +721,6 @@ impl Parser {
             if d == 0 { break; } self.next();
         }
         self.next(); 
-    }
-
-    fn parse_while(&mut self) {
-        self.expect_keyword("while"); let start = self.pos;
-        loop {
-            self.pos = start;
-            if let Value::Bool(b) = self.parse_cond() {
-                if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
-                if !b { self.skip_block(); break; }
-                while let Some(t) = self.peek() { if let Token::Keyword(ref k) = t { if k == "end" { break; } } self.parse_stmt(); }
-            } else { break; }
-        }
     }
 
     fn parse_for(&mut self) {
