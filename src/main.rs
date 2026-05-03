@@ -104,7 +104,7 @@ fn forge_packet(
     ip_packet.set_checksum(checksum);
 
     let mut tcp_packet = MutableTcpPacket::new(ip_packet.payload_mut()).unwrap();
-    tcp_packet.set_source(4444);
+    tcp_packet.set_source(8888);
     tcp_packet.set_destination(80);
     tcp_packet.set_sequence(seq_num);
     tcp_packet.set_acknowledgement(ack_num);
@@ -133,9 +133,9 @@ fn lexer(code: &str) -> Vec<Token> {
         ("NUMBER", r"\d+(\.\d*)?"),
         ("KEYWORD", r"\b(breach|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
-        ("COMP", r"==|!=|<=|>=|<|>"),
+        ("COMP", r"==|!=|<=|>=|=>|<|>"), 
         ("ASSIGN", r"="),
-        ("OP", r"=>|<=|[+\-*/%]"),
+        ("OP", r"[+\-*/%]"),            
         ("STRING", r#""(?:\\.|[^"\\])*""#),
         ("DELIM", r";"),
         ("PUNCT", r"[{}:,]"),
@@ -232,7 +232,7 @@ impl Parser {
     fn parse_stmt(&mut self) {
         // Handle gateway pipe syntax: id => payload
         if let Some(Token::Identifier(ref id)) = self.peek() {
-            if self.tokens.get(self.pos + 1) == Some(&Token::Operator("=>".to_string())) {
+            if self.tokens.get(self.pos + 1) == Some(&Token::Compare("=>".to_string())) {
                 let id_clone = id.clone();
                 self.parse_pipe_injection(id_clone);
                 return;
@@ -299,8 +299,9 @@ impl Parser {
                                     
                                     println!("Received SYN-ACK from server. Completing handshake...");
                                     
-                                    let bad_ack = forge_packet(source_ip, dest_ip, source_mac, dest_mac, hijacked_ack, 999999999, TcpFlags::ACK, &[]);
-                                    tx.send_to(&bad_ack, None).unwrap().unwrap();
+                                    // REPLACED THE BAD ACK WITH THE PHANTOM HANDSHAKE
+                                    let good_ack = forge_packet(source_ip, dest_ip, source_mac, dest_mac, hijacked_ack, hijacked_seq + 1, TcpFlags::ACK, &[]);
+                                    tx.send_to(&good_ack, None).unwrap().unwrap();
                                     break;
                                 }
                             }
