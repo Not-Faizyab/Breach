@@ -1,6 +1,5 @@
 use std::ptr;
 
-// The signature we are hunting for in memory:
 // 4C 8B D1 : mov r10, rcx
 // B8       : mov eax, [SSN]
 const SYSCALL_STUB: [u8; 4] = [0x4C, 0x8B, 0xD1, 0xB8];
@@ -25,7 +24,5 @@ pub unsafe fn hunt_ssn(function_address: *const u8) -> Option<u32> {
         }
     }
     
-    // If we hit an EDR hook (like a JMP instruction), the stub won't be here.
-    // (Bypassing that requires "Halo's Gate", which reads neighboring functions).
     None
 }

