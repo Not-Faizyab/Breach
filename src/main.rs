@@ -453,6 +453,15 @@ impl Parser {
     fn parse_factor(&mut self) -> Value {
         let tok = self.peek().expect("Unexpected EOF"); 
         match tok {
+            Token::Punctuation(ref p) if p == "(" => {
+    self.next();                  
+    let val = self.parse_cond(); 
+    match self.peek() {
+        Some(Token::Punctuation(ref p)) if p == ")" => self.next(),
+        _ => panic!("Expected ')'"),
+    }
+    val
+}
             Token::Number(n) => { self.next(); Value::Num(n) },
             Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
             Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
