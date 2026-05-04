@@ -243,8 +243,10 @@ impl Parser {
         if let Some(Token::Keyword(k)) = self.peek() {
             match k.as_str() {
                 "set" => self.parse_assignment(), "log" => self.parse_log(), "scan" => self.parse_scan(),
-                "swarm" => self.parse_swarm(), "payload" => self.parse_payload(), "transmit" => self.parse_transmit(), 
-                "import" => self.parse_import(), "while" => self.parse_while(), "for" => self.parse_for(),
+                "swarm" => self.parse_swarm(),
+"payload" => self.parse_payload(),
+"transmit" => { let _ = self.parse_transmit(); },
+"import" => self.parse_import(), "while" => self.parse_while(), "for" => self.parse_for(),
                 "if" => self.parse_standard_if(), "wait" => self.parse_wait(), "write" => self.parse_file_op(false),
                 "append" => self.parse_file_op(true), "push" => self.parse_push(), "pop" => self.parse_pop(),
                 "fn" | "op" => self.parse_fn(), "return" => self.parse_return(), 
@@ -793,23 +795,43 @@ impl Parser {
         }
     }
 
-    fn parse_transmit(&mut self) {
-        self.expect_keyword("transmit");
-        let url_val = self.parse_factor();
-        let payload = match self.parse_factor() { 
-            Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
-            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), Value::Gateway{..}=> "gateway".to_string(), Value::None => "None".to_string() 
-        };
-        if let Some(Token::Delimiter) = self.peek() { self.next(); }
-        let url = if let Value::Str(s) = url_val { s } else { panic!(); };
-        println!("Transmitting HTTP POST request to target...");
-        if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build() {
-            match client.post(&url).header("Content-Type", "application/json").body(payload).send() {
-                Ok(r) => { if r.status().is_success() { println!("Request completed successfully."); } else { println!("Request failed with non-success status."); } },
-                Err(e) => println!("Network communication error: {}", e),
+    fn parse_transmit(&mut self) -> Value {
+    self.expect_keyword("transmit");
+
+    let url_val = self.parse_factor();
+    let payload_val = self.parse_factor();
+
+    if let Some(Token::Delimiter) = self.peek() {
+        self.next();
+    }
+
+    let url = match url_val {
+        Value::Str(s) => s,
+        _ => panic!("URL must be string"),
+    };
+
+    let payload = match payload_val {
+        Value::Str(s) => s,
+        Value::Num(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => "".to_string(),
+    };
+
+    if let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        match client.post(&url).body(payload).send() {
+            Ok(resp) => {
+                let text = resp.text().unwrap_or_default();
+                return Value::Str(text);
             }
+            Err(_) => return Value::Str("".to_string()),
         }
     }
+
+    Value::Str("".to_string())
+}
 
     fn parse_file_op(&mut self, is_append: bool) { 
         self.next(); 
