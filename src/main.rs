@@ -461,8 +461,15 @@ impl Parser {
         _ => panic!("Expected ')'"),
     }
     val
-}
+},
             Token::Number(n) => { self.next(); Value::Num(n) },
+            Token::Operator(ref op) if op == "-" => {
+    self.next(); // consume '-'
+    match self.parse_factor() {
+        Value::Num(n) => Value::Num(-n),
+        _ => panic!("Unary '-' only works on numbers"),
+    }
+},
             Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
             Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
             Token::Keyword(k) if k == "call" => self.parse_call(), Token::Keyword(k) if k == "get" => self.parse_get(),
