@@ -21,6 +21,36 @@
 
 <br>
 
+## ⫸ Navigation
+* [Abstract](#-abstract)
+* [Architecture](#-1-architectural-overview)
+* [L2/L3 Evasion](#-2-l2l3-evasion-the-phantom-ip--custom-tcp-stack)
+* [L7 Mutilation](#-3-l7-protocol-mutilation-htx-bypasses)
+* [Hell's Gate](#-4-endpoint-evasion-dynamic-syscall-resolution)
+* [Language Specs](#-5-the-breach-language-brc-virtual-machine)
+* [Usage Examples](#-7-core-functions-and-usage)
+* [Deployment](#-8-deployment--build-prerequisites)
+
+## ⫸ Project Structure
+```text
+.
+├── lib/
+│   ├── Packet.lib
+│   ├── wpcap.lib
+├── src/
+│   ├── hunter.rs    
+│   ├── syscall.rs      
+│   └── main.rs         
+├── .gitignore
+├── Cargo.lock
+├── Cargo.toml
+├── LICENSE
+├── README.md
+├── build.rs
+├── script.brc
+└── turing_evidence.log
+```
+
 ## ⫸ Abstract
 
 Breach is a highly specialized turing-complete interpreted programming language (`.brc`). 
@@ -58,6 +88,56 @@ Once the L2 link is established, Breach manually drives the 3-way handshake via 
 3. Calculates the mathematical offsets (`next_ack = h_seq + 1`) and injects the finalizing ACK.
 4. Maintains the hijacked SEQ/ACK variables in the language's virtual machine memory for subsequent payload delivery (PSH-ACK).
 
+``` mermaid
+    ---
+config:
+  flowchart:
+    nodeSpacing: 80
+    rankSpacing: 160
+    curve: stepBefore
+  theme: dark
+  layout: dagre
+  look: handDrawn
+  fontFamily: '''Source Code Pro Variable'', monospace'
+  themeVariables:
+    fontFamily: '''Source Code Pro Variable'', monospace'
+---
+graph TD
+    subgraph Tier_User [TIER 1: USERLAND EXECUTION]
+        VM[Breach .brc VM]
+    end
+    subgraph Tier_Link [TIER 2: DATA LINK LAYER]
+        NIC[Physical NIC]
+        Ghost((Phantom IP))
+    end
+    subgraph Tier_Kernel [TIER 3: HOST KERNEL]
+        OS[Host OS Kernel]
+    end
+    subgraph Tier_Target [TIER 4: REMOTE TARGET]
+        Target[Target Gateway]
+    end
+    VM ==>|1. Raw SYN Injection| NIC
+    NIC ==>|2. L2 Packet Forward| Target
+    Target -.->|3. ARP Broadcast| NIC
+    NIC ==>|4. Forged ARP Reply| Target
+    Target -.->|5. SYN-ACK Response| Ghost
+    Ghost -.->|6. Promiscuous Capture| VM
+    OS -.-x|RST Dropped| Ghost
+    classDef breach fill:#0b5394,stroke:#3d85c6,stroke-width:3px,color:#fff
+    classDef kernel fill:#741b47,stroke:#a64d79,stroke-width:2px,color:#fff
+    classDef phantom fill:#351c75,stroke:#674ea7,stroke-width:3px,color:#fff
+    classDef hardware fill:#274e13,stroke:#6aa84f,stroke-width:2px,color:#fff
+
+    class VM breach
+    class OS kernel
+    class Ghost phantom
+    class NIC,Target hardware
+    style Tier_User fill:none,stroke:none
+    style Tier_Link fill:none,stroke:none
+    style Tier_Kernel fill:none,stroke:none
+    style Tier_Target fill:none,stroke:none
+```
+
 ---
 
 ## ⫸ 3. L7 Protocol Mutilation: HTX Bypasses
@@ -73,6 +153,43 @@ Breach abandons traditional Transfer-Encoding obfuscation in environments with s
 ### 3.2 Double-Identity Header Evasion
 For targets requiring TE obfuscation, Breach injects conflicting Transfer-Encoding arrays (e.g., `Transfer-Encoding: identity` followed by `Transfer-Encoding: chunked`). The proxy parses the `identity` directive (passing the payload unmodified), while the backend processes the `chunked` directive, initiating the desync payload execution.
 
+``` mermaid
+    ---
+config:
+  flowchart:
+    nodeSpacing: 100
+    rankSpacing: 100
+    curve: stepBefore
+  theme: dark
+  look: handDrawn
+  fontFamily: '''Source Code Pro Variable'', monospace'
+---
+graph TD
+    subgraph Tier_Engine [TIER 1: USERLAND PAYLOAD GENERATION]
+        VM[Breach Engine]
+    end
+    subgraph Tier_Proxy [TIER 2: PROXY INTERFACE]
+        Proxy[Firewall]
+    end
+    subgraph Tier_Target [TIER 3: BACKEND EXECUTION]
+        Backend[Server]
+    end
+    VM ==>|1. Inject CL.0 Buffer| Proxy
+    Proxy ==>|2. Transparent Forward| Backend
+    Backend -.->|3. Return Initial Response| VM
+    Backend -.->|4. Return Smuggled Response| VM
+    classDef breach fill:#0b5394,stroke:#3d85c6,stroke-width:3px,color:#fff
+    classDef infra fill:#274e13,stroke:#6aa84f,stroke-width:2px,color:#fff
+    classDef server fill:#351c75,stroke:#674ea7,stroke-width:3px,color:#fff
+
+    class VM breach
+    class Proxy infra
+    class Backend server
+    style Tier_Engine fill:none,stroke:none
+    style Tier_Proxy fill:none,stroke:none
+    style Tier_Target fill:none,stroke:none
+```
+
 ---
 
 ## ⫸ 4. Endpoint Evasion: Dynamic Syscall Resolution
@@ -85,6 +202,48 @@ Instead of relying on standard Rust `std::fs` calls which wrap the Win32 API (`W
 * It walks the Export Directory to locate undocumented NTAPI functions (e.g., `NtWriteFile`).
 * It extracts the System Service Number (SSN) directly from the function stub by matching the opcode signature (`0x4C, 0x8B, 0xD1, 0xB8`).
 * By resolving the SSN dynamically, Breach can execute raw syscalls directly to the kernel, entirely bypassing Ring-3 EDR telemetry during post-exploitation loot logging.
+
+``` mermaid
+    ---
+config:
+  flowchart:
+    nodeSpacing: 100
+    rankSpacing: 140
+    curve: stepBefore
+  theme: dark
+  look: handDrawn
+  fontFamily: '''Source Code Pro Variable'', monospace'
+---
+graph TD
+    subgraph Tier_Engine [TIER 1: USERLAND EXECUTION]
+        B[Breach Engine]
+    end
+    subgraph Tier_Memory [TIER 2: LIBRARY MEMORY SPACE]
+        NT[ntdll.dll Export Directory]
+    end
+    subgraph Tier_EDR [TIER 3: EDR / AV TELEMETRY]
+        H[API Hooks & User-land Monitoring]
+    end
+    subgraph Tier_Kernel [TIER 4: KERNEL SPACE]
+        K[Windows Kernel]
+    end
+    B ==>|"1. Base Address Hunt"| NT
+    NT ==>|"2. Extract SSN via Opcode Scan"| B
+    B -.->|"Standard API Call (Intercepted)"| H
+    B ==>|"3. Direct Syscall Execution"| K
+    H -.-x|"No Telemetry Logged"| K
+    classDef breach fill:#0b5394,stroke:#3d85c6,stroke-width:3px,color:#fff
+    classDef danger fill:#990000,stroke:#cc0000,stroke-width:2px,color:#fff
+    classDef system fill:#274e13,stroke:#6aa84f,stroke-width:2px,color:#fff
+
+    class B breach
+    class H danger
+    class NT,K system
+    style Tier_Engine fill:none,stroke:none
+    style Tier_Memory fill:none,stroke:none
+    style Tier_EDR fill:none,stroke:none
+    style Tier_Kernel fill:none,stroke:none
+```
 
 ---
 
