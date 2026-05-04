@@ -471,6 +471,7 @@ impl Parser {
     }
 },
             Token::StringLiteral(s) | Token::IpAddress(s) => { self.next(); Value::Str(s) },
+            Token::Keyword(k) if k == "transmit" => self.parse_transmit(),
             Token::Identifier(id) => { self.next(); self.memory.get(&id).cloned().unwrap_or(Value::Num(0.0)) },
             Token::Keyword(k) if k == "call" => self.parse_call(), Token::Keyword(k) if k == "get" => self.parse_get(),
             Token::Keyword(k) if k == "num" => {
