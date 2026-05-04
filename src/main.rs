@@ -866,8 +866,19 @@ impl Parser {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { println!("Error: Missing input file argument."); return; }
-    let raw_code = fs::read_to_string(&args[1]).unwrap_or_else(|_| { println!("Error: Unable to read the input file."); std::process::exit(1); });
+    if args.len() < 2 { 
+        println!("Error: Missing input file. Usage: cargo run -- <file.brc>"); 
+        return; 
+    }
+    let filename = &args[1];
+    if !filename.ends_with(".brc") {
+        println!("Error: Invalid file type. Please provide a .brc file.");
+        std::process::exit(1);
+    }
+    let raw_code = fs::read_to_string(filename).unwrap_or_else(|_| { 
+        println!("Error: Unable to read input file."); 
+        std::process::exit(1); 
+    });
     let raw_tokens = lexer(&raw_code);
     let mutated_tokens = mutate_token_stream(raw_tokens);
     let mut execution_engine = Parser::new(mutated_tokens);
