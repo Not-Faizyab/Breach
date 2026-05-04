@@ -1,5 +1,0 @@
-set gw = breach "192.168.56.101";
-gw => "GET / HTTP/1.1\r\nHost: target\r\n\r\n";
-set loot = <= gw;
-log "\n[--- SERVER RESPONSE ---]";
-log loot;
