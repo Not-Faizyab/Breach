@@ -5,7 +5,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write as StdWrite};
 use std::net::{TcpStream, ToSocketAddrs, Ipv4Addr};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::_rdtsc;
 
 // Raw socket interface using libpnet
 use pnet::datalink;
@@ -50,8 +52,9 @@ enum Value {
     Bool(bool), 
     List(Vec<Value>),
     Dict(HashMap<String, Value>),
-    // Represents a compromised gateway connection
     Gateway { target_ip: String, target_mac: [u8; 6], next_seq: u32, next_ack: u32 },
+    TimeAnchor(Instant),
+    CycleAnchor(u64),
     None 
 }
 
@@ -132,7 +135,7 @@ fn lexer(code: &str) -> Vec<Token> {
         ("SKIP", r"[ \t\n\r]+|//.*"),
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        ("KEYWORD", r"\b(desync|gateway|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break)\b"),
+        ("KEYWORD", r"\b(desync|gateway|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break|mark|measure)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|=>|<|>"), 
         ("ASSIGN", r"="),
@@ -218,6 +221,62 @@ impl Parser {
             functions: HashMap::new(), has_error: false, 
             return_value: Value::None, has_break: false
         } 
+    }
+
+    fn parse_mark(&mut self) -> Value {
+        self.expect_keyword("mark");
+        
+        // Check if the user is asking for raw CPU cycles
+        if let Some(Token::Identifier(id)) = self.peek() {
+            if id == "cycles" {
+                self.next();
+                #[cfg(target_arch = "x86_64")]
+                unsafe { return Value::CycleAnchor(_rdtsc()); }
+                #[cfg(not(target_arch = "x86_64"))]
+                panic!("Cycles measurement only supported on x86_64 architectures.");
+            }
+        }
+        
+        // Otherwise, drop a standard time anchor
+        Value::TimeAnchor(Instant::now())
+    }
+
+    fn parse_measure(&mut self) -> Value {
+        self.expect_keyword("measure");
+        let target_var = if let Some(Token::Identifier(id)) = self.peek() { self.next(); id } else { panic!("Expected temporal anchor variable"); };
+        
+        self.expect_keyword("in");
+        let precision = if let Value::Str(s) = self.parse_factor() { s } else { panic!("Expected precision string (e.g., \"ms\", \"us\")"); };
+
+        let anchor = self.memory.get(&target_var).cloned().expect("FATAL: Temporal anchor not found in memory.");
+
+        match anchor {
+            Value::TimeAnchor(start_time) => {
+                let elapsed = start_time.elapsed();
+                let result = match precision.as_str() {
+                    "s" => elapsed.as_secs_f64(),
+                    "ms" => elapsed.as_millis() as f64,
+                    "us" => elapsed.as_micros() as f64,
+                    "ns" => elapsed.as_nanos() as f64,
+                    _ => panic!("Syntax Error: Invalid precision flag. Use s, ms, us, or ns."),
+                };
+                Value::Num(result)
+            }
+            Value::CycleAnchor(start_cycles) => {
+                if precision.as_str() != "cycles" {
+                    panic!("Syntax Error: Cycle anchors can only be measured in 'cycles'.");
+                }
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    let current_cycles = _rdtsc();
+                    let delta = current_cycles - start_cycles;
+                    return Value::Num(delta as f64);
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                panic!("Architecture unsupported.");
+            }
+            _ => panic!("Type Error: Attempted to measure a non-temporal variable."),
+        }
     }
     
     fn peek(&self) -> Option<Token> { self.tokens.get(self.pos).cloned() }
@@ -519,9 +578,13 @@ impl Parser {
         let mut passed_args = Vec::new();
         while self.peek() != Some(Token::Delimiter) && self.peek().is_some() { passed_args.push(self.parse_factor()); }
         if let Some((arg_names, body)) = self.functions.get(&name).cloned() {
-            let mut sub = Parser::new(body); sub.functions = self.functions.clone();
+            let mut sub = Parser::new(body);
+sub.functions = self.functions.clone();
+sub.memory = self.memory.clone();
             for (i, val) in passed_args.into_iter().enumerate() { if i < arg_names.len() { sub.memory.insert(arg_names[i].clone(), val); } }
-            sub.parse(); return sub.return_value;
+            sub.parse();
+self.memory = sub.memory.clone();
+return sub.return_value;
         }
         Value::None
     }
@@ -601,7 +664,8 @@ impl Parser {
                 "dict" => { self.next(); Value::Dict(HashMap::new()) },
                 "rand" => self.parse_rand(), "resolve" => self.parse_resolve(),
                 "input" => self.parse_input(), "gateway" => self.parse_gateway(),
-                "desync" => self.parse_desync(), // Parse desync operation
+                "desync" => self.parse_desync(),"mark" => self.parse_mark(),
+                "measure" => self.parse_measure(),
                 _ => self.parse_cond(),
             }
         } else { self.parse_cond() };
@@ -637,9 +701,13 @@ impl Parser {
         let val = match self.parse_cond() {
             Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
             Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), 
-            Value::Gateway { .. } => "[Raw Ring-0 Gateway Object]".to_string(), Value::None => "None".to_string(),
+            Value::Gateway { .. } => "[Raw Ring-0 Gateway Object]".to_string(), 
+            Value::TimeAnchor(_) => "[Temporal Anchor]".to_string(),
+            Value::CycleAnchor(_) => "[Hardware Cycle Anchor]".to_string(),
+            Value::None => "None".to_string(),
         };
-        println!("{}", val); if let Some(Token::Delimiter) = self.peek() { self.next(); }
+        println!("{}", val); 
+        if let Some(Token::Delimiter) = self.peek() { self.next(); }
     }
 
     fn parse_cond(&mut self) -> Value {
@@ -838,8 +906,12 @@ impl Parser {
         let filepath = if let Value::Str(s) = self.parse_factor() { s } else { panic!(); }; 
         let content = match self.parse_factor() { 
             Value::Num(n) => n.to_string(), Value::Str(s) => s, Value::Bool(b) => b.to_string(), 
-            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), Value::Gateway{..}=> "gateway".to_string(), Value::None => "None".to_string()
-        }; 
+            Value::List(l) => format!("{:?}", l), Value::Dict(d) => format!("{:?}", d), 
+            Value::Gateway{..}=> "gateway".to_string(), 
+            Value::TimeAnchor(_) => "[Temporal Anchor]".to_string(),
+            Value::CycleAnchor(_) => "[Hardware Cycle Anchor]".to_string(),
+            Value::None => "None".to_string()
+        };
         if let Some(Token::Delimiter) = self.peek() { self.next(); } 
         #[cfg(target_os = "windows")]
         unsafe {
